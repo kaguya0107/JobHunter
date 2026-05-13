@@ -19,7 +19,7 @@ Configure with environment variables:
   CROWDWORKS_DISCORD_WEBHOOK_URLS     Space-separated Discord webhooks, **one per CROWDWORKS_URLS URL** (same order).
 
   DASHBOARD_INGEST            If "1"/"true"/"yes", POST poll results to the Job Hunter dashboard API.
-  DASHBOARD_INGEST_URL        Base URL (e.g. ``http://127.0.0.1:3000``). Requires ``DASHBOARD_INGEST_SECRET``.
+  DASHBOARD_INGEST_URL        Base URL of the dashboard **Next.js origin only** — no trailing path (e.g. ``http://127.0.0.1:3000`` or ``https://your-app.vercel.app``). POST target is ``{base}/api/internal/ingest``. If Next uses ``basePath`` (subpath deployment), include that path in this URL (e.g. ``https://host/jobhunter``). Requires ``DASHBOARD_INGEST_SECRET``.
   DASHBOARD_INGEST_SECRET     Shared secret — must match ``DASHBOARD_INGEST_SECRET`` in dashboard ``.env``.
   DASHBOARD_RECORD_SCRAPES    If "1", send scrape rows every poll even when no new jobs (can be chatty).
   MONITOR_PARSER_VERSION      Optional string stored as ``parser_version`` on sources (default: ``monitor.py``).
@@ -467,11 +467,19 @@ def push_dashboard_ingest(
     try:
         r = session.post(endpoint, data=body.encode("utf-8"), headers=headers, timeout=45)
         if r.status_code >= 400:
+            snippet = ((r.text or "").replace("\n", " ").strip())[:360]
             LOG.warning(
-                "Dashboard ingest HTTP %s — %s",
+                "Dashboard ingest HTTP %s for %s — %s",
                 r.status_code,
-                (r.text or "")[:400],
+                endpoint,
+                snippet or "(empty body)",
             )
+            if r.status_code == 404:
+                LOG.warning(
+                    "Ingest 404 usually means DASHBOARD_INGEST_URL is not the Next app root that serves "
+                    "`/api/internal/ingest` (wrong host, missing deploy, or app uses `basePath` / subpath without "
+                    "including it in the base URL).",
+                )
         else:
             LOG.info("Dashboard ingest OK (%d listing(s), %d new job row(s))", len(listings_payload), len(detected_payload))
     except requests.RequestException as e:

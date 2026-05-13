@@ -6,6 +6,7 @@ import {
   CopyIcon,
   ExternalLinkIcon,
   FilterIcon,
+  InfoIcon,
   MoreHorizontalIcon,
 } from "lucide-react";
 import * as React from "react";
@@ -27,6 +28,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -35,6 +37,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { motion } from "framer-motion";
 
 type JobRow = {
@@ -64,6 +67,13 @@ type JobRow = {
 };
 
 const NEW_MS = 2 * 3600 * 1000;
+
+/** True when scores are monitor ingest placeholders — not LLM-ranked. */
+function isListingParseOnly(ai: JobRow["aiAnalysis"]): boolean {
+  if (!ai) return false;
+  const note = ai.analysisJson?.note;
+  return typeof note === "string" && note.toLowerCase().includes("placeholder");
+}
 
 export default function JobsPage() {
   const qc = useQueryClient();
@@ -192,9 +202,9 @@ export default function JobsPage() {
                     <TableHead>Job</TableHead>
                     <TableHead>Platform</TableHead>
                     <TableHead>Budget</TableHead>
-                    <TableHead>AI</TableHead>
-                    <TableHead>Notif</TableHead>
-                    <TableHead className="text-right">Open</TableHead>
+                    <TableHead className="hidden sm:table-cell">AI</TableHead>
+                    <TableHead>Notify</TableHead>
+                    <TableHead className="w-[112px] text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -203,6 +213,7 @@ export default function JobsPage() {
                     const fresh = Date.now() - detected < NEW_MS;
                     const raw = job.aiScoreNormalized ?? job.aiScore;
                     const scorePct = raw != null ? (raw <= 2 ? raw * 100 : raw) : null;
+                    const parseOnly = isListingParseOnly(job.aiAnalysis);
                     return (
                       <motion.tr
                         layout
@@ -244,9 +255,30 @@ export default function JobsPage() {
                             ))}
                           </div>
                         </TableCell>
-                        <TableCell>{job.platform}</TableCell>
-                        <TableCell>{job.budget}</TableCell>
-                        <TableCell>{scorePct != null ? `${scorePct.toFixed(1)} pts` : "—"}</TableCell>
+                        <TableCell className="whitespace-nowrap text-sm">{job.platform}</TableCell>
+                        <TableCell className="max-w-[140px] truncate text-sm" title={job.budget}>
+                          {job.budget || "—"}
+                        </TableCell>
+                        <TableCell className="hidden sm:table-cell">
+                          {parseOnly ? (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="cursor-help text-xs text-zinc-500 underline decoration-dotted dark:text-zinc-400">
+                                  Listing only
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent side="left" className="max-w-[220px] text-left">
+                                Scores are not from an LLM yet — they come from the board listing parse (often 0).
+                              </TooltipContent>
+                            </Tooltip>
+                          ) : scorePct != null ? (
+                            <Badge variant="outline" className="font-mono text-xs font-normal tabular-nums">
+                              {scorePct.toFixed(1)} pts
+                            </Badge>
+                          ) : (
+                            <span className="text-zinc-400">—</span>
+                          )}
+                        </TableCell>
                         <TableCell>
                           {job.notificationStatus === "FAILED" ? (
                             <Badge variant="outline" className="border-red-500 text-red-600 dark:border-red-400 dark:text-red-300">
@@ -257,29 +289,52 @@ export default function JobsPage() {
                           )}
                         </TableCell>
                         <TableCell className="text-right">
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button size="icon" variant="ghost" aria-label={`Actions ${job.title}`}>
-                                <MoreHorizontalIcon className="size-4" />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end">
-                              <DropdownMenuItem asChild>
-                                <a href={job.projectUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2">
-                                  <ExternalLinkIcon className="size-4" /> Open source
-                                </a>
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                onClick={async () => {
-                                  await navigator.clipboard.writeText(job.projectUrl);
-                                  toast.success("Copied URL");
-                                }}
-                              >
-                                <CopyIcon className="mr-2 size-4" /> Copy URL
-                              </DropdownMenuItem>
-                              <DropdownMenuItem onClick={() => setDetail(job)}>Details</DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
+                          <div className="flex items-center justify-end gap-0.5">
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button size="icon" variant="ghost" className="size-8 shrink-0" asChild>
+                                  <a
+                                    href={job.projectUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    aria-label={`Open job posting: ${job.title.slice(0, 80)}`}
+                                  >
+                                    <ExternalLinkIcon className="size-4" />
+                                  </a>
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Open posting in new tab</TooltipContent>
+                            </Tooltip>
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button size="icon" variant="ghost" className="size-8 shrink-0" aria-label={`More actions: ${job.title.slice(0, 60)}`}>
+                                  <MoreHorizontalIcon className="size-4" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" className="min-w-[200px]">
+                                <DropdownMenuItem asChild>
+                                  <a href={job.projectUrl} target="_blank" rel="noopener noreferrer">
+                                    <ExternalLinkIcon />
+                                    Open posting in new tab
+                                  </a>
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  onClick={async () => {
+                                    await navigator.clipboard.writeText(job.projectUrl);
+                                    toast.success("Job URL copied");
+                                  }}
+                                >
+                                  <CopyIcon />
+                                  Copy job URL
+                                </DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem onClick={() => setDetail(job)}>
+                                  <InfoIcon />
+                                  View details…
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </div>
                         </TableCell>
                       </motion.tr>
                     );
@@ -287,7 +342,14 @@ export default function JobsPage() {
                   {!data?.length ? (
                     <TableRow>
                       <TableCell colSpan={7}>
-                        <p className="py-10 text-center text-sm text-zinc-500">No hits for this slice.</p>
+                        <div className="flex flex-col items-center gap-2 py-14 text-center">
+                          <p className="font-medium text-zinc-900 dark:text-zinc-100">No jobs in this view</p>
+                          <p className="max-w-md text-sm text-zinc-500">
+                            Adjust filters or wait for{" "}
+                            <code className="rounded-md bg-zinc-100 px-1.5 py-0.5 font-mono text-xs dark:bg-zinc-800">monitor.py</code>{" "}
+                            to ingest new postings. Rows only appear once a job has been detected at least once.
+                          </p>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ) : null}
@@ -315,7 +377,14 @@ export default function JobsPage() {
                 />
                 <DetailRow label="Detected" value={new Date(detail.detectedAt).toLocaleString()} />
                 <DetailRow label="Notification" value={detail.notificationStatus} />
-                <DetailRow label="AI relevance" value={String(detail.aiAnalysis?.relevanceScore ?? detail.aiScore ?? "—")} />
+                <DetailRow
+                  label="AI relevance"
+                  value={
+                    detail.aiAnalysis && isListingParseOnly(detail.aiAnalysis)
+                      ? "— (not LLM-ranked; placeholder from listing parse)"
+                      : String(detail.aiAnalysis?.relevanceScore ?? detail.aiScore ?? "—")
+                  }
+                />
                 <div>
                   <Label className="text-xs uppercase text-zinc-500">Description</Label>
                   <p className="mt-2 whitespace-pre-wrap">{detail.description || "(empty)"}</p>

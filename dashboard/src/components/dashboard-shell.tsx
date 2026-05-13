@@ -16,6 +16,7 @@ import * as React from "react";
 import { useTheme } from "next-themes";
 
 import { CommandMenu } from "@/components/command-menu";
+import { NotificationBell } from "@/components/notification-bell";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { useUiStore } from "@/stores/ui-store";
@@ -101,6 +102,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
             </div>
 
             <div className="flex items-center gap-2">
+              <NotificationBell />
               <Button
                 variant="outline"
                 size="sm"
