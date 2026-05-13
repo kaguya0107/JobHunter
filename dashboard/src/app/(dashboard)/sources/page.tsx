@@ -16,6 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { cn } from "@/lib/utils";
 
 const MODES: ScrapingType[] = ["HTML_PARSE", "API", "HYBRID"];
 const PAGE_SIZE = 8;
@@ -110,7 +111,10 @@ export default function SourcesPage() {
                     <TableHead>Parser</TableHead>
                     <TableHead>Last check</TableHead>
                     <TableHead>Status</TableHead>
-                    <TableHead>On</TableHead>
+                    <TableHead className="w-[120px]">
+                      <span className="block">Active</span>
+                      <span className="block text-[10px] font-normal normal-case text-zinc-400">On = scraping</span>
+                    </TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -232,15 +236,34 @@ function Row({ source, onRequestDelete }: { source: MonitoringSource; onRequestD
           {source.status}
         </Badge>
       </TableCell>
-      <TableCell>
-        <Switch
-          checked={active}
-          disabled={patch.isPending}
-          onCheckedChange={(v) => {
-            setActive(v);
-            patch.mutate({ active: v });
-          }}
-        />
+      <TableCell className="w-[128px]">
+        <div
+          className="flex items-center justify-start gap-2 sm:min-w-[7.5rem]"
+          title={active ? "Monitoring is on — this source is scraped." : "Monitoring is off — this source is paused."}
+        >
+          <Switch
+            checked={active}
+            disabled={patch.isPending}
+            aria-label={
+              active
+                ? `Pause scraping for ${source.platform} source`
+                : `Enable scraping for ${source.platform} source`
+            }
+            onCheckedChange={(v) => {
+              setActive(v);
+              patch.mutate({ active: v });
+            }}
+          />
+          <span
+            className={cn(
+              "min-w-[1.75rem] text-[10px] font-bold tabular-nums uppercase tracking-wide",
+              active ? "text-emerald-600 dark:text-emerald-400" : "text-zinc-500 dark:text-zinc-500",
+            )}
+            aria-hidden
+          >
+            {active ? "On" : "Off"}
+          </span>
+        </div>
       </TableCell>
       <TableCell className="flex justify-end gap-2">
         <Dialog open={open} onOpenChange={setOpen}>
