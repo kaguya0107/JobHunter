@@ -1,22 +1,14 @@
-# Virtual environments
+# ---- Python ----
 .venv/
 venv/
 env/
-
-# Secrets & local env
-.env
-.env.*
-!.env.example
-
-# Seen-job state (machine-specific)
-lancers_seen.json
-
-# Bytecode
 __pycache__/
 *.py[cod]
 *$py.class
-
-# Test / tooling caches
+*.egg-info/
+.eggs/
+dist/
+build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -24,13 +16,32 @@ __pycache__/
 coverage.xml
 htmlcov/
 
-# Builds
-*.egg-info/
-.eggs/
-dist/
-build/
+# ---- Secrets & local env (keep templates tracked) ----
+.env
+.env.*
+!.env.example
+!dashboard/.env.example
 
-# Editors / OS (optional noise)
+# ---- Monitor state (per machine) ----
+lancers_seen.json
+
+# ---- Node / dashboard (Next.js) ----
+node_modules/
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+dashboard/.turbo/
+dashboard/.vercel/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# ---- Editors / OS ----
 .idea/
 *.swp
+*~
 .DS_Store
+Thumbs.db
