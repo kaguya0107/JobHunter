@@ -1,17 +1,35 @@
 #!/usr/bin/env python3
 """
-Poll Lancers.jp job listing pages and post Discord webhook notifications when new jobs appear.
+Poll Japanese job-board listing pages (Lancers.jp + CrowdWorks.jp) and post Discord webhooks when new jobs appear.
 
 Configure with environment variables:
 
-  DISCORD_WEBHOOK_URL    Single webhook used for every listing URL (unless DISCORD_WEBHOOK_URLS is set)
-  DISCORD_WEBHOOK_URLS   Space-separated webhooks, **one per URL** in `LANCERS_URLS` / defaults (same order).
-                           Example: system webhook then web webhook → posts each category to its own Discord channel.
+  JOB_BOARD_URLS       Optional. If set, **only** these space-separated URLs are monitored (full control of order and mix).
+                         Webhooks must be set with ``DISCORD_WEBHOOK_URL`` / ``DISCORD_WEBHOOK_URLS`` (same count as URLs).
+
+  Lancers.jp (ignored when JOB_BOARD_URLS is set):
+
+  LANCERS_URLS                    Search URLs (default: system + web).
+  LANCERS_DISCORD_WEBHOOK_URLS    Space-separated Discord webhooks, **one per LANCERS_URLS URL** (same order).
+
+  CrowdWorks.jp (ignored when JOB_BOARD_URLS is set):
+
+  CROWDWORKS_URLS                     Search URLs. Default when this key is **absent**: category **226** (システム) + **230** (Web) with ``order=new``.
+                                          Set ``CROWDWORKS_URLS`` to an empty value to disable CrowdWorks listings.
+  CROWDWORKS_DISCORD_WEBHOOK_URLS     Space-separated Discord webhooks, **one per CROWDWORKS_URLS URL** (same order).
+
+  Discord notification layout:
+
+    • Recommended: ``LANCERS_DISCORD_WEBHOOK_URLS`` and ``CROWDWORKS_DISCORD_WEBHOOK_URLS`` as soon as **either**
+      platform-specific variable appears in the environment (do not rely on legacy ``DISCORD_WEBHOOK_URLS`` in that mode).
+    • Legacy combined list ``DISCORD_WEBHOOK_URLS``: one webhook per URL in order (**Lancers first**, **CrowdWorks second**).
+      Used only when **neither** platform-specific webhook variable exists.
+    • ``DISCORD_WEBHOOK_URL``: one channel for **all** URLs.
 
   COPY_TO_CLIPBOARD          If enabled (default 1), writes plain-text 「依頼詳細」をまとめた内容 to the OS clipboard whenever new jobs are notified
   POLL_INTERVAL_SECONDS Polling interval when running in daemon mode (default 180)
   STATE_PATH            JSON file storing seen job IDs **per category** under ``known_ids_by_category``
-                           (keys such as ``system``, ``web``, derived from ``LANCERS_URLS`` paths).
+                           (e.g. ``system``, ``web``, ``cw_226``, ``cw_230``).
   HTTP_TIMEOUT_SECONDS  Request timeout (default 30)
   NOTIFY_ON_FIRST_RUN   If "1"/"true"/"yes", notify for all jobs on the first poll instead of only seeding state
   DISCORD_POST_DELAY_SECONDS   Pause between webhook requests when sending batches (default 1.25)
@@ -51,7 +69,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -75,12 +93,20 @@ def load_env_file_if_available() -> None:
 
 LOG = logging.getLogger("lancers_monitor")
 
-DEFAULT_URLS = (
+DEFAULT_LANCERS_URLS = (
     "https://www.lancers.jp/work/search/system?open=1&ref=header_menu",
     "https://www.lancers.jp/work/search/web?open=1&ref=header_menu",
 )
 
-DEFAULT_UA = "JobHunterLancersMonitor/1.0 (+https://example.invalid/bot)"
+DEFAULT_CROWDWORKS_URLS = (
+    "https://crowdworks.jp/public/jobs/search?category_id=226&order=new",
+    "https://crowdworks.jp/public/jobs/search?category_id=230&order=new",
+)
+
+DEFAULT_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 JobHunterMonitor/1.0"
+)
 
 WORK_ID_RE = re.compile(r"/work/detail/(\d+)")
 REQUEST_DETAIL_TERM_MARKERS = ("依頼概要", "募集内容", "仕事の内容", "依頼内容", "仕事詳細")
@@ -118,7 +144,13 @@ class JobListing:
         if name:
             parts.append(name)
         if self.client_profile_url:
-            parts.append(urljoin("https://www.lancers.jp", self.client_profile_url))
+            ch = self.client_profile_url.strip()
+            if ch.startswith("http://") or ch.startswith("https://"):
+                parts.append(ch)
+            else:
+                du = urlparse(self.detail_url)
+                base = f"{du.scheme}://{du.netloc}" if du.scheme and du.netloc else "https://www.lancers.jp"
+                parts.append(urljoin(base + "/", ch.lstrip("/")))
         extras = self.client_extras.strip()
         if extras:
             parts.append(extras)
@@ -174,17 +206,98 @@ def validate_discord_webhook_execute_url(url: str) -> None:
         )
 
 
-def load_urls_env() -> list[str]:
+def _split_ws_urls(raw: str) -> list[str]:
+    return [u for u in (x.strip() for x in raw.split()) if u]
+
+
+def _lancers_listing_urls_from_env() -> list[str]:
     raw = os.environ.get("LANCERS_URLS", "").strip()
-    if raw:
-        return [u for u in (x.strip() for x in raw.split()) if u]
-    return list(DEFAULT_URLS)
+    return _split_ws_urls(raw) if raw else list(DEFAULT_LANCERS_URLS)
+
+
+def _crowdworks_listing_urls_from_env() -> list[str]:
+    if "CROWDWORKS_URLS" in os.environ:
+        cw_raw = os.environ.get("CROWDWORKS_URLS", "").strip()
+        return _split_ws_urls(cw_raw) if cw_raw else []
+    return list(DEFAULT_CROWDWORKS_URLS)
+
+
+def load_urls_env() -> list[str]:
+    merged = os.environ.get("JOB_BOARD_URLS", "").strip()
+    if merged:
+        return _split_ws_urls(merged)
+    return _lancers_listing_urls_from_env() + _crowdworks_listing_urls_from_env()
+
+
+def _normalize_webhook_list(raw: str) -> list[str]:
+    hooks = [normalize_discord_webhook_url(h) for h in _split_ws_urls(raw)]
+    return [h for h in hooks if h]
+
+
+def _platform_discord_webhook_keys_used() -> bool:
+    return "LANCERS_DISCORD_WEBHOOK_URLS" in os.environ or "CROWDWORKS_DISCORD_WEBHOOK_URLS" in os.environ
+
+
+def _assignments_from_platform_webhooks(lan_u: list[str], cw_u: list[str]) -> dict[str, str]:
+    """Build listing URL → webhook using LANCERS_DISCORD_WEBHOOK_URLS / CROWDWORKS_DISCORD_WEBHOOK_URLS."""
+    lan_key = "LANCERS_DISCORD_WEBHOOK_URLS"
+    cw_key = "CROWDWORKS_DISCORD_WEBHOOK_URLS"
+    assignments: dict[str, str] = {}
+
+    if lan_u:
+        if lan_key not in os.environ:
+            raise ValueError(
+                f"Set `{lan_key}` ({len(lan_u)} space-separated webhook(s), same order as Lancers URLs) "
+                "or remove platform webhook keys and use DISCORD_WEBHOOK_URL / DISCORD_WEBHOOK_URLS instead."
+            )
+        lan_h = _normalize_webhook_list(os.environ.get(lan_key, ""))
+        if len(lan_u) != len(lan_h):
+            raise ValueError(
+                f"`{lan_key}` needs exactly one webhook per Lancers listing URL "
+                f"({len(lan_u)} URL(s); found {len(lan_h)} webhook(s))."
+            )
+        assignments.update(zip(lan_u, lan_h, strict=True))
+    else:
+        if lan_key in os.environ and _normalize_webhook_list(os.environ.get(lan_key, "")):
+            raise ValueError(f"`{lan_key}` defines webhooks but there are zero Lancers listing URLs.")
+
+    if cw_u:
+        if cw_key not in os.environ:
+            raise ValueError(
+                f"Set `{cw_key}` ({len(cw_u)} space-separated webhook(s), same order as CrowdWorks URLs) "
+                "or remove platform webhook keys and use DISCORD_WEBHOOK_URL / DISCORD_WEBHOOK_URLS instead."
+            )
+        cw_h = _normalize_webhook_list(os.environ.get(cw_key, ""))
+        if len(cw_u) != len(cw_h):
+            raise ValueError(
+                f"`{cw_key}` needs exactly one webhook per CrowdWorks listing URL "
+                f"({len(cw_u)} URL(s); found {len(cw_h)} webhook(s))."
+            )
+        assignments.update(zip(cw_u, cw_h, strict=True))
+    else:
+        if cw_key in os.environ and _normalize_webhook_list(os.environ.get(cw_key, "")):
+            raise ValueError(f"`{cw_key}` defines webhooks but CrowdWorks is disabled / has no URLs.")
+
+    return assignments
+
+
+def listing_url_is_crowdworks(listing_url: str) -> bool:
+    host = (urlparse(listing_url).hostname or "").lower()
+    return host.endswith("crowdworks.jp")
 
 
 def listing_category_label(listing_url: str) -> str:
-    """Short label for Discord / clipboard headers (e.g. ``system``, ``web``)."""
+    """Short label for Discord / clipboard headers (e.g. ``system``, ``web``, ``cw_226``)."""
     try:
-        parts = urlparse(listing_url).path.strip("/").split("/")
+        p = urlparse(listing_url)
+        host = (p.hostname or "").lower()
+        if host.endswith("crowdworks.jp") and "/public/jobs/search" in p.path:
+            qs = parse_qs(p.query)
+            cat = (qs.get("category_id") or [""])[0].strip()
+            if cat.isdigit():
+                return f"cw_{cat}"
+            return "crowdworks_search"
+        parts = p.path.strip("/").split("/")
         if len(parts) >= 3 and parts[0] == "work" and parts[1] == "search":
             tail = "/".join(parts[2:])
             return tail if tail else "search"
@@ -207,6 +320,40 @@ def monitor_category_buckets(urls: list[str]) -> list[str]:
 
 def load_listing_webhook_assignments(urls: list[str]) -> dict[str, str]:
     """Map each monitored listing URL → Discord webhook URL."""
+    if os.environ.get("JOB_BOARD_URLS", "").strip():
+        multi_raw = os.environ.get("DISCORD_WEBHOOK_URLS", "").strip()
+        single_raw = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+        if _platform_discord_webhook_keys_used():
+            raise ValueError(
+                "Do not combine `JOB_BOARD_URLS` with `LANCERS_DISCORD_WEBHOOK_URLS` / "
+                "`CROWDWORKS_DISCORD_WEBHOOK_URLS`. Use DISCORD_WEBHOOK_URL or DISCORD_WEBHOOK_URLS matching "
+                "the custom URL list instead."
+            )
+        if multi_raw:
+            hooks = [normalize_discord_webhook_url(h) for h in multi_raw.split()]
+            hooks = [h for h in hooks if h]
+            if len(hooks) != len(urls):
+                raise ValueError(
+                    "`DISCORD_WEBHOOK_URLS` must list one webhook per `JOB_BOARD_URLS` entry "
+                    f'({len(urls)} URLs; {len(hooks)} webhook(s)).'
+                )
+            return dict(zip(urls, hooks, strict=True))
+        single = normalize_discord_webhook_url(single_raw)
+        if single:
+            return {u: single for u in urls}
+        raise ValueError(
+            "With JOB_BOARD_URLS set, configure DISCORD_WEBHOOK_URL (same channel for all URLs) "
+            "or DISCORD_WEBHOOK_URLS with one webhook per URL in the same order."
+        )
+
+    lan_u = _lancers_listing_urls_from_env()
+    cw_u = _crowdworks_listing_urls_from_env()
+    if urls != lan_u + cw_u:
+        raise RuntimeError("internal: listing URLs out of sync with env composition.")
+
+    if _platform_discord_webhook_keys_used():
+        return _assignments_from_platform_webhooks(lan_u, cw_u)
+
     multi_raw = os.environ.get("DISCORD_WEBHOOK_URLS", "").strip()
     single_raw = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 
@@ -215,17 +362,17 @@ def load_listing_webhook_assignments(urls: list[str]) -> dict[str, str]:
         hooks = [h for h in hooks if h]
         if len(hooks) != len(urls):
             raise ValueError(
-                "DISCORD_WEBHOOK_URLS must contain exactly one webhook URL per monitored listing URL "
-                f'({len(urls)} URLs configured); received {len(hooks)} webhook(s). Same order as LANCERS_URLS — '
-                'first webhook → first URL, etc.'
+                "`DISCORD_WEBHOOK_URLS` must list exactly one webhook per listing URL "
+                f"({len(urls)} URL(s): Lancers first, then CrowdWorks; received {len(hooks)} webhook(s)). "
+                "Alternatively split by platform using `LANCERS_DISCORD_WEBHOOK_URLS` + `CROWDWORKS_DISCORD_WEBHOOK_URLS`."
             )
         return {urls[i]: hooks[i] for i in range(len(urls))}
 
     single = normalize_discord_webhook_url(single_raw)
     if not single:
         raise ValueError(
-            "Set DISCORD_WEBHOOK_URL for one Discord channel for all categories, "
-            "or DISCORD_WEBHOOK_URLS with one webhook per listing URL (same order as LANCERS_URLS)."
+            "Set Discord webhooks via `DISCORD_WEBHOOK_URL` / `DISCORD_WEBHOOK_URLS`, or use platform-specific "
+            "`LANCERS_DISCORD_WEBHOOK_URLS` plus `CROWDWORKS_DISCORD_WEBHOOK_URLS` (see module docstring)."
         )
     return {u: single for u in urls}
 
@@ -300,9 +447,9 @@ def parse_listing_summary_text(card: BeautifulSoup) -> str:
     return ""
 
 
-def extract_request_details_from_work_detail_html(html: str) -> str:
+def extract_request_details_from_work_detail_html(page_html: str) -> str:
     """Full「依頼概要」(or similar) section from https://www.lancers.jp/work/detail/{id}."""
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(page_html, "html.parser")
     for dl in soup.select("dl.c-definition-list"):
         dt = dl.select_one("dt.c-definition-list__term")
         dd = dl.select_one("dd.c-definition-list__description")
@@ -316,6 +463,156 @@ def extract_request_details_from_work_detail_html(html: str) -> str:
     return ""
 
 
+def extract_crowdworks_detail_description(page_html: str) -> str:
+    """Job body from CrowdWorks detail page (JobPosting JSON-LD ``description``, HTML-encoded)."""
+    soup = BeautifulSoup(page_html, "html.parser")
+    for sc in soup.select('script[type="application/ld+json"]'):
+        raw = (sc.string or sc.get_text() or "").strip()
+        if not raw:
+            continue
+        try:
+            d = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(d, list):
+            d = d[0] if d else {}
+        if not isinstance(d, dict):
+            continue
+        if d.get("@type") != "JobPosting":
+            continue
+        desc = d.get("description")
+        if not desc or not isinstance(desc, str):
+            continue
+        plain = BeautifulSoup(html.unescape(desc), "html.parser").get_text(
+            separator="\n", strip=True
+        )
+        if plain:
+            return plain
+    return ""
+
+
+def extract_job_detail_for_clipboard(detail_html: str, detail_url: str) -> str:
+    host = (urlparse(detail_url).hostname or "").lower()
+    if host.endswith("crowdworks.jp"):
+        return extract_crowdworks_detail_description(detail_html)
+    return extract_request_details_from_work_detail_html(detail_html)
+
+
+def _cw_format_yen(amount: float | int | None) -> str:
+    if amount is None:
+        return "—"
+    try:
+        n = int(amount)
+        return f"{n:,}"
+    except (TypeError, ValueError):
+        return str(amount)
+
+
+def crowdworks_payment_summary(payment: dict | None) -> str:
+    if not isinstance(payment, dict):
+        return "(未取得)"
+    parts: list[str] = []
+
+    hw = payment.get("hourly_payment")
+    if isinstance(hw, dict):
+        mn = hw.get("min_hourly_wage")
+        mx = hw.get("max_hourly_wage")
+        if mn is not None or mx is not None:
+            parts.append(
+                f"時給 {_cw_format_yen(mn)}〜{_cw_format_yen(mx)} 円"
+            )
+
+    fp = payment.get("fixed_price_payment")
+    if isinstance(fp, dict):
+        mn = fp.get("min_budget")
+        mx = fp.get("max_budget")
+        if mn is not None or mx is not None:
+            parts.append(f"固定 {_cw_format_yen(mn)}〜{_cw_format_yen(mx)} 円")
+
+    return " · ".join(parts) if parts else "予算（一覧）: 要確認 / 応相談"
+
+
+def absolutize_crowdworks_asset(url: str | None) -> str | None:
+    if not url or not isinstance(url, str):
+        return None
+    u = url.strip()
+    if not u:
+        return None
+    if u.startswith("//"):
+        return "https:" + u
+    if u.startswith("http://") or u.startswith("https://"):
+        return u
+    return urljoin("https://crowdworks.jp/", u.lstrip("/"))
+
+
+def parse_crowdworks_listings(page_html: str, listing_url: str) -> list[JobListing]:
+    """Parse embedded ``#vue-container`` JSON from CrowdWorks search (first result page)."""
+    soup = BeautifulSoup(page_html, "html.parser")
+    vc = soup.select_one("#vue-container")
+    if not vc:
+        LOG.warning(
+            "CrowdWorks: no #vue-container in %s — page structure may have changed.",
+            listing_url[:100],
+        )
+        return []
+    raw_data = vc.get("data") or ""
+    try:
+        payload = json.loads(html.unescape(raw_data))
+    except json.JSONDecodeError as e:
+        LOG.warning("CrowdWorks: could not parse vue-container JSON (%s): %s", listing_url[:80], e)
+        return []
+
+    offers = (payload.get("searchResult") or {}).get("job_offers") or []
+    out: list[JobListing] = []
+    for row in offers:
+        jo = row.get("job_offer") or {}
+        jid = jo.get("id")
+        if jid is None:
+            continue
+        try:
+            wid = str(int(jid))
+        except (TypeError, ValueError):
+            continue
+
+        title = " ".join((jo.get("title") or "").split())
+        summary = " ".join((jo.get("description_digest") or "").split())
+        client = row.get("client") or {}
+        uid = client.get("user_id")
+        uname = (client.get("username") or "").strip()
+        avatar = absolutize_crowdworks_asset((client.get("user_picture_url") or "").strip() or None)
+        profile_href: str | None
+        try:
+            profile_href = f"/public/employers/{int(uid)}" if uid is not None else None
+        except (TypeError, ValueError):
+            profile_href = None
+
+        entry = (row.get("entry") or {}).get("project_entry") or {}
+        num_c = entry.get("num_contracts")
+        orders = str(num_c) if num_c is not None else None
+
+        payment = row.get("payment")
+        budget = crowdworks_payment_summary(payment if isinstance(payment, dict) else None)
+
+        detail = f"https://crowdworks.jp/public/jobs/{wid}"
+        out.append(
+            JobListing(
+                work_id=wid,
+                title=title,
+                budget_text=budget,
+                detail_url=detail,
+                client_name=uname,
+                client_profile_url=profile_href,
+                client_extras="",
+                source_listing_url=listing_url,
+                listing_summary=summary,
+                client_avatar_url=avatar,
+                client_orders=orders,
+                client_rating=None,
+            )
+        )
+    return out
+
+
 def _listing_card_title_anchor(card: Tag) -> Tag | None:
     """Title link inside a listing card — main grid vs 「新着」carousel markup differ."""
     title_a = card.select_one("a.p-search-job-media__title")
@@ -327,8 +624,10 @@ def _listing_card_title_anchor(card: Tag) -> Tag | None:
     return card.select_one("a[href^='/work/detail/']")
 
 
-def parse_listings(html: str, listing_url: str) -> list[JobListing]:
-    soup = BeautifulSoup(html, "html.parser")
+def parse_listings(page_html: str, listing_url: str) -> list[JobListing]:
+    if listing_url_is_crowdworks(listing_url):
+        return parse_crowdworks_listings(page_html, listing_url)
+    soup = BeautifulSoup(page_html, "html.parser")
     out: list[JobListing] = []
     carousel_cards = soup.select("div.p-search-job__latest-carousel-item.c-media")
     main_cards = soup.select("div.p-search-job-media.c-media")
@@ -423,7 +722,7 @@ def _clipboard_plain_inner(session: requests.Session, jobs: list[JobListing], ti
         if fetch_detail:
             try:
                 detail_html_text = fetch_html(session, job.detail_url, timeout)
-                body = extract_request_details_from_work_detail_html(detail_html_text)
+                body = extract_job_detail_for_clipboard(detail_html_text, job.detail_url)
             except requests.RequestException as e:
                 LOG.warning("Clipboard: could not fetch work detail %s (%s)", job.work_id, e)
         if not body.strip():
@@ -545,18 +844,56 @@ def format_rating_plain_text(rating: float, *, scale: float = 5.0) -> str:
     return f"{stars} {r:g} / {scale:g}"
 
 
+def _discord_platform_branding(detail_url: str) -> tuple[str, int, dict[str, str], dict[str, str]]:
+    """Intro line, embed color (RGB int), author block, footer — Lancers vs クラウドワークス."""
+    host = (urlparse(detail_url).hostname or "").lower()
+    if host.endswith("crowdworks.jp"):
+        intro = "**【クラウドワークス】** 新しく検出された案件です。"
+        color = 0xEA580E
+        author = {
+            "name": "クラウドワークス · CrowdWorks",
+            "url": "https://crowdworks.jp/",
+            "icon_url": "https://crowdworks.jp/favicon.ico",
+        }
+        footer = {
+            "text": "CrowdWorks.jp 通知",
+            "icon_url": "https://crowdworks.jp/favicon.ico",
+        }
+        return intro, color, author, footer
+
+    intro = "**【Lancers.jp】** 求人ボードで新しく検出された案件です。"
+    color = 0x2563EB
+    author = {
+        "name": "Lancers",
+        "url": "https://www.lancers.jp/",
+        "icon_url": "https://www.lancers.jp/favicon.ico",
+    }
+    footer = {
+        "text": "Lancers.jp 通知",
+        "icon_url": "https://www.lancers.jp/favicon.ico",
+    }
+    return intro, color, author, footer
+
+
 def job_to_discord_embed(job: JobListing) -> dict:
     """One Discord embed for a listing (combined up to 10 per webhook POST)."""
     title = job.title[:250] + ("…" if len(job.title) > 250 else "")
     client_display = job.client_name.strip() or "クライアント"
 
+    du = urlparse(job.detail_url)
+    intro, embed_color, author_block, footer_block = _discord_platform_branding(job.detail_url)
     desc_lines = [
-        "Lancers求人ボードで新しく検出された案件です。",
+        intro,
         "",
         f"**👤 {client_display}**",
     ]
     if job.client_profile_url:
-        pf = urljoin("https://www.lancers.jp", job.client_profile_url)
+        ch = job.client_profile_url.strip()
+        if ch.startswith("http://") or ch.startswith("https://"):
+            pf = ch
+        else:
+            base = f"{du.scheme}://{du.netloc}" if du.scheme and du.netloc else "https://www.lancers.jp"
+            pf = urljoin(base + "/", ch.lstrip("/"))
         desc_lines.append(f"[プロフィールを開く]({pf})")
 
     if job.client_orders:
@@ -577,7 +914,9 @@ def job_to_discord_embed(job: JobListing) -> dict:
         "title": title,
         "url": job.detail_url,
         "description": description,
-        "color": 0x58B5D5,
+        "color": embed_color,
+        "author": author_block,
+        "footer": footer_block,
         "fields": [
             {"name": "💰 予算（一覧表示）", "value": job.budget_text[:1024]},
             {"name": "📎 求人URL", "value": job.detail_url[:1024]},
@@ -635,7 +974,7 @@ def build_live_preview_html(jobs: list[JobListing]) -> bytes:
     page = f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Lancers structured preview</title>
+<title>Job boards · structured preview</title>
 <style>
 body{{font-family:system-ui,sans-serif;margin:16px;background:#f1f5f9;color:#0f172a;}}
 .note{{opacity:.85;font-size:.9rem;max-width:900px;line-height:1.5;margin-bottom:14px;}}
@@ -646,7 +985,7 @@ th{{background:#e8f1ff;text-align:left;font-weight:600;}}
 .cat{{color:#2563eb;font-weight:700;font-size:.8rem;}}
 .sub{{font-size:.8rem;opacity:.88;display:block;margin-top:4px;line-height:1.4;}}
 .snip{{max-width:360px;color:#475569;font-size:.8rem;}}</style></head><body>
-<h1 style="margin:0 0 8px;font-size:1.2rem;">Lancers · structured listing snapshot</h1>
+<h1 style="margin:0 0 8px;font-size:1.2rem;">Listing snapshot (Lancers · CrowdWorks)</h1>
 <p class="note">Fields match what <code>monitor.py</code> parses from category search HTML ({len(jobs)} row(s)).
 <a href="/json">Raw JSON array</a> · stop the process with Ctrl+C.</p>
 <table><thead><tr>
@@ -776,7 +1115,7 @@ def discord_notify_monitor_started(
         f"- **{listing_category_label(u)}**: `{u}`" for u in sorted(listing_urls_for_this_channel)
     )
     content = (
-        "**Lancers Monitor 起動しました**\n"
+        "**Job board monitor 起動しました**\n"
         "求人ボード監視プロセスが立ち上がりました。\n\n"
         f"- ホスト: `{host}`\n"
         f"- PID: `{os.getpid()}`\n"
@@ -992,7 +1331,9 @@ def run_poll(
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Monitor Lancers.jp listings and notify Discord.")
+    parser = argparse.ArgumentParser(
+        description="Monitor Lancers.jp and CrowdWorks.jp listings; notify Discord.",
+    )
     parser.add_argument(
         "--once",
         action="store_true",
