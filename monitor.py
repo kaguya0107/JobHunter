@@ -18,6 +18,12 @@ Configure with environment variables:
                                           Set ``CROWDWORKS_URLS`` to an empty value to disable CrowdWorks listings.
   CROWDWORKS_DISCORD_WEBHOOK_URLS     Space-separated Discord webhooks, **one per CROWDWORKS_URLS URL** (same order).
 
+  DASHBOARD_INGEST            If "1"/"true"/"yes", POST poll results to the Job Hunter dashboard API.
+  DASHBOARD_INGEST_URL        Base URL of the dashboard **Next.js origin only** — no trailing path (e.g. ``http://127.0.0.1:3000`` or ``https://your-app.vercel.app``). POST target is ``{base}/api/internal/ingest``. If Next uses ``basePath`` (subpath deployment), include that path in this URL (e.g. ``https://host/jobhunter``). Requires ``DASHBOARD_INGEST_SECRET``.
+  DASHBOARD_INGEST_SECRET     Shared secret — must match ``DASHBOARD_INGEST_SECRET`` in dashboard ``.env``.
+  DASHBOARD_RECORD_SCRAPES    If "1", send scrape rows every poll even when no new jobs (can be chatty).
+  MONITOR_PARSER_VERSION      Optional string stored as ``parser_version`` on sources (default: ``monitor.py``).
+
   Discord notification layout:
 
     • Recommended: ``LANCERS_DISCORD_WEBHOOK_URLS`` and ``CROWDWORKS_DISCORD_WEBHOOK_URLS`` as soon as **either**
@@ -58,6 +64,7 @@ from collections import defaultdict
 import html
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -66,6 +73,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -316,6 +324,166 @@ def monitor_category_buckets(urls: list[str]) -> list[str]:
             seen.add(k)
             keys.append(k)
     return keys
+
+
+def _dashboard_ingest_enabled() -> bool:
+    return env_bool("DASHBOARD_INGEST", False) and bool(
+        os.environ.get("DASHBOARD_INGEST_URL", "").strip()
+        and os.environ.get("DASHBOARD_INGEST_SECRET", "").strip()
+    )
+
+
+def _dashboard_record_scrapes_without_jobs() -> bool:
+    return env_bool("DASHBOARD_RECORD_SCRAPES", False)
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _json_export_safe(obj: object) -> object:
+    """Recursively coerce values so json.dumps(..., allow_nan=False) and strict JSON parsers accept the payload."""
+
+    if obj is None:
+        return None
+    if isinstance(obj, float):
+        return None if math.isnan(obj) or math.isinf(obj) else obj
+    if isinstance(obj, (str, bool, int)):
+        return obj
+    if isinstance(obj, dict):
+        out: dict[str, object] = {}
+        for k, v in obj.items():
+            out[str(k)] = _json_export_safe(v)
+        return out
+    if isinstance(obj, (list, tuple)):
+        return [_json_export_safe(v) for v in obj]
+    return str(obj)
+
+
+def _truncate_chars(s: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(s) <= max_chars:
+        return s
+    suf = "\n...[truncated]"
+    n = max(0, max_chars - len(suf))
+    return s[:n] + suf
+
+
+def _platform_label_for_listing(listing_url: str) -> str:
+    return "CrowdWorks" if listing_url_is_crowdworks(listing_url) else "Lancers"
+
+
+def _scraping_type_for_listing(listing_url: str) -> str:
+    return "HYBRID" if listing_url_is_crowdworks(listing_url) else "HTML_PARSE"
+
+
+def push_dashboard_ingest(
+    session: requests.Session,
+    listing_webhooks: dict[str, str],
+    urls: list[str],
+    jobs_found_per_url: dict[str, int],
+    listing_errors: dict[str, str | None],
+    new_entries: list[JobListing],
+    discord_by_detail_url: dict[str, tuple[str, bool, str | None]],
+    poll_started_iso: str,
+    poll_finished_iso: str,
+) -> None:
+    if not _dashboard_ingest_enabled():
+        return
+    base = os.environ.get("DASHBOARD_INGEST_URL", "").strip().rstrip("/")
+    secret = os.environ.get("DASHBOARD_INGEST_SECRET", "").strip()
+    endpoint = f"{base}/api/internal/ingest"
+    interval = int(os.environ.get("POLL_INTERVAL_SECONDS", "180"))
+    parser_ver = os.environ.get("MONITOR_PARSER_VERSION", "monitor.py")
+
+    try:
+        host = socket.gethostname()
+    except OSError:
+        host = ""
+
+    listings_payload: list[dict] = []
+    for u in urls:
+        err_t = listing_errors.get(u)
+        success = err_t is None
+        listings_payload.append(
+            {
+                "listingUrl": u,
+                "platform": _platform_label_for_listing(u),
+                "scrapingType": _scraping_type_for_listing(u),
+                "success": success,
+                "jobsFound": int(jobs_found_per_url.get(u, 0)),
+                "errorMessage": err_t,
+            }
+        )
+
+    detected_payload: list[dict] = []
+    for job in new_entries:
+        wh, ok_del, d_err = discord_by_detail_url.get(
+            job.detail_url,
+            (listing_webhooks.get(job.source_listing_url, ""), False, None),
+        )
+        row: dict = {
+            "listingUrl": job.source_listing_url,
+            "categoryLabel": _truncate_chars(listing_category_label(job.source_listing_url), 250),
+            "workId": _truncate_chars(job.work_id, 92),
+            "title": _truncate_chars(job.title, 8000),
+            "budget": _truncate_chars(job.budget_text, 8000),
+            "clientName": _truncate_chars(job.client_name, 2000),
+            "detailUrl": job.detail_url,
+            "listingSummary": _truncate_chars(job.listing_summary or "", 120_000),
+            "discordDelivered": ok_del,
+            "discordError": _truncate_chars(d_err, 4000) if d_err else d_err,
+            "raw": _json_export_safe(job_public_dict(job)),
+        }
+        if wh.strip():
+            row["webhookUrl"] = wh.strip()
+        detected_payload.append(row)
+
+    if not detected_payload and not _dashboard_record_scrapes_without_jobs():
+        return
+
+    payload = {
+        "pollStartedAt": poll_started_iso,
+        "pollFinishedAt": poll_finished_iso,
+        "workerHost": host[:250] if host else None,
+        "pollingIntervalSeconds": interval,
+        "parserVersion": parser_ver[:120],
+        "listings": listings_payload,
+        "detectedJobs": detected_payload,
+    }
+    payload_safe = _json_export_safe(payload)
+    try:
+        body = json.dumps(payload_safe, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as e:
+        LOG.warning("Dashboard ingest: could not serialize payload: %s", e)
+        return
+
+    headers = {
+        "Authorization": f"Bearer {secret}",
+        "Content-Type": "application/json; charset=utf-8",
+        "User-Agent": os.environ.get("HTTP_USER_AGENT", DEFAULT_UA).strip() or DEFAULT_UA,
+    }
+    try:
+        r = session.post(endpoint, data=body.encode("utf-8"), headers=headers, timeout=45)
+        if r.status_code >= 400:
+            snippet = ((r.text or "").replace("\n", " ").strip())[:360]
+            LOG.warning(
+                "Dashboard ingest HTTP %s for %s — %s",
+                r.status_code,
+                endpoint,
+                snippet or "(empty body)",
+            )
+            if r.status_code == 404:
+                LOG.warning(
+                    "Ingest 404 usually means DASHBOARD_INGEST_URL is not the Next app root that serves "
+                    "`/api/internal/ingest` (wrong host, missing deploy, or app uses `basePath` / subpath without "
+                    "including it in the base URL).",
+                )
+        else:
+            LOG.info("Dashboard ingest OK (%d listing(s), %d new job row(s))", len(listings_payload), len(detected_payload))
+    except requests.RequestException as e:
+        LOG.warning("Dashboard ingest request failed: %s", e)
 
 
 def load_listing_webhook_assignments(urls: list[str]) -> dict[str, str]:
@@ -1240,12 +1408,21 @@ def run_poll(
 
     When notify_on_first_poll is False and every category bucket is empty, only seeds state.
     """
+    poll_started_iso = _utc_iso()
     all_from_round: dict[str, JobListing] = {}
     ordered_ids: list[str] = []
+    jobs_found_per_url: defaultdict[str, int] = defaultdict(int)
+    listing_errors: dict[str, str | None] = {}
 
     for url in urls:
-        html = fetch_html(session, url, timeout)
+        try:
+            html = fetch_html(session, url, timeout)
+        except requests.RequestException as e:
+            listing_errors[url] = str(e)[:500]
+            LOG.error("Listing fetch failed %s: %s", url[:80], e)
+            continue
         for job in parse_listings(html, url):
+            jobs_found_per_url[url] += 1
             if job.work_id not in all_from_round:
                 ordered_ids.append(job.work_id)
                 all_from_round[job.work_id] = job
@@ -1256,6 +1433,7 @@ def run_poll(
     for k in buckets:
         known[k].update(already_known.get(k, set()))
 
+    discord_by_detail_url: dict[str, tuple[str, bool, str | None]] = {}
     empty_state = sum(len(v) for v in known.values()) == 0
     suppress_all = empty_state and not notify_on_first_poll
 
@@ -1318,12 +1496,36 @@ def run_poll(
         for hook_url in hooks_seen:
             bucket = [j for j in new_entries if listing_webhooks[j.source_listing_url] == hook_url]
             if bucket:
-                post_discord_new_jobs(hook_url, bucket)
+                try:
+                    post_discord_new_jobs(hook_url, bucket)
+                    for job in bucket:
+                        discord_by_detail_url[job.detail_url] = (hook_url, True, None)
+                except Exception as e:
+                    err_msg = str(e)[:500]
+                    LOG.error("Discord webhook delivery failed (%s jobs): %s", len(bucket), e)
+                    for job in bucket:
+                        discord_by_detail_url[job.detail_url] = (hook_url, False, err_msg)
 
     for wid in ordered_ids:
         job = all_from_round[wid]
         cat = listing_category_label(job.source_listing_url)
         known.setdefault(cat, set()).add(wid)
+
+    poll_finished_iso = _utc_iso()
+    try:
+        push_dashboard_ingest(
+            session,
+            listing_webhooks,
+            urls,
+            dict(jobs_found_per_url),
+            listing_errors,
+            new_entries,
+            discord_by_detail_url,
+            poll_started_iso,
+            poll_finished_iso,
+        )
+    except Exception as e:
+        LOG.warning("Dashboard ingest unexpected error: %s", e)
 
     save_state(state_path, dict(known), urls)
     LOG.debug("Poll done; known counts by category: %s", {k: len(v) for k, v in sorted(known.items())})
