@@ -8,8 +8,16 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -20,7 +28,12 @@ import {
 } from "@/components/ui/table";
 import { ClientExtrasInline } from "@/components/client-extras-inline";
 import { sanitizeClientExtrasText } from "@/lib/client-extras-text";
-import { absoluteProfileUrl, type ClientAnalysisRow, type ClientAnalysisSummary } from "@/lib/client-analysis";
+import {
+  absoluteProfileUrl,
+  compareRecruitmentAchievementSort,
+  type ClientAnalysisRow,
+  type ClientAnalysisSummary,
+} from "@/lib/client-analysis";
 import { cn } from "@/lib/utils";
 
 type Payload = {
@@ -45,6 +58,9 @@ function clientSearchHaystack(row: ClientAnalysisRow): string {
   if (platJoined.includes("lancer")) bits.push("lw", "lancers");
   if (platJoined.includes("crowd")) bits.push("cw", "crowdworks");
   bits.push(typeof row.ratingDisplay === "number" ? row.ratingDisplay.toFixed(1) : "0");
+  if (row.recruitmentAchievement != null) {
+    bits.push(String(row.recruitmentAchievement), `募集実績 ${row.recruitmentAchievement}`);
+  }
   const last = new Date(row.lastDetectedAt).toLocaleString().toLowerCase();
   bits.push(last, row.lastDetectedAt.slice(0, 10));
   return bits.filter(Boolean).join(" ").toLowerCase();
@@ -54,6 +70,34 @@ function filterClients(clients: ClientAnalysisRow[], query: string): ClientAnaly
   const needle = query.trim().toLowerCase();
   if (!needle) return clients;
   return clients.filter((row) => clientSearchHaystack(row).includes(needle));
+}
+
+type ClientSortKey = "rating" | "lastDetected" | "recruitmentAchievement";
+
+type ClientSortDir = "asc" | "desc";
+
+function ratingSortValue(row: ClientAnalysisRow): number {
+  return row.ratingDisplay != null && Number.isFinite(row.ratingDisplay) ? row.ratingDisplay : 0;
+}
+
+/** 評価・最終検出・募集実績（CWの募集実績件数／LWの発注数）で並べ替え。同順位は表示名で安定ソート。 */
+function sortClientRows(rows: ClientAnalysisRow[], key: ClientSortKey, dir: ClientSortDir): ClientAnalysisRow[] {
+  const mul = dir === "desc" ? -1 : 1;
+  return [...rows].sort((a, b) => {
+    let cmp = 0;
+    if (key === "rating") cmp = ratingSortValue(a) - ratingSortValue(b);
+    else if (key === "lastDetected") cmp = Date.parse(a.lastDetectedAt) - Date.parse(b.lastDetectedAt);
+    else
+      cmp = compareRecruitmentAchievementSort(a.recruitmentAchievement, b.recruitmentAchievement, dir);
+    if (key !== "recruitmentAchievement" && cmp !== 0) return cmp * mul;
+    if (key === "recruitmentAchievement" && cmp !== 0) return cmp;
+    return a.displayName.localeCompare(b.displayName, "ja");
+  });
+}
+
+function ariaSortForColumn(activeKey: ClientSortKey, columnKey: ClientSortKey, dir: ClientSortDir) {
+  if (activeKey !== columnKey) return undefined;
+  return dir === "desc" ? ("descending" as const) : ("ascending" as const);
 }
 
 export default function ClientsAnalysisPage() {
@@ -69,11 +113,18 @@ export default function ClientsAnalysisPage() {
 
   const [detailRow, setDetailRow] = React.useState<ClientAnalysisRow | null>(null);
   const [clientSearchQuery, setClientSearchQuery] = React.useState("");
+  const [sortKey, setSortKey] = React.useState<ClientSortKey>("recruitmentAchievement");
+  const [sortDir, setSortDir] = React.useState<ClientSortDir>("desc");
 
   const filteredClients = React.useMemo(() => {
     if (!data?.clients) return [];
     return filterClients(data.clients, clientSearchQuery);
   }, [data?.clients, clientSearchQuery]);
+
+  const displayedClients = React.useMemo(
+    () => sortClientRows(filteredClients, sortKey, sortDir),
+    [filteredClients, sortKey, sortDir],
+  );
 
   return (
     <div className="space-y-8">
@@ -145,25 +196,59 @@ export default function ClientsAnalysisPage() {
           ) : null}
 
           <Card className="border-zinc-200 dark:border-zinc-800">
-            <CardHeader className="gap-4 space-y-0 sm:flex-row sm:items-end sm:justify-between">
-              <div className="min-w-0 flex-1 space-y-1.5">
-                <CardTitle className="text-lg">クライアント一覧</CardTitle>
-                <CardDescription>
-                  プロフィールURLがある場合はそれで同一視し、無い場合は「プラットフォーム × 表示名」でまとめています。アバターまたは表示名をクリックすると詳細を表示します。
-                </CardDescription>
-              </div>
-              <div className="relative w-full shrink-0 sm:w-72">
-                <SearchIcon
-                  className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-zinc-400"
-                  aria-hidden
-                />
-                <Input
-                  value={clientSearchQuery}
-                  onChange={(e) => setClientSearchQuery(e.target.value)}
-                  placeholder="名前・PF・補足・求人タイトル…"
-                  className="bg-white pl-9 dark:bg-zinc-950"
-                  aria-label="クライアントを検索"
-                />
+            <CardHeader className="gap-4 space-y-0">
+              <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <CardTitle className="text-lg">クライアント一覧</CardTitle>
+                </div>
+                <div className="flex w-full shrink-0 flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-end xl:w-auto xl:justify-end">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Label htmlFor="client-sort-key" className="whitespace-nowrap text-xs text-zinc-500">
+                      並び替え
+                    </Label>
+                    <Select value={sortKey} onValueChange={(v) => setSortKey(v as ClientSortKey)}>
+                      <SelectTrigger
+                        id="client-sort-key"
+                        className="h-9 w-[min(100%,240px)] bg-white dark:bg-zinc-950 sm:w-[240px]"
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="recruitmentAchievement">
+                          募集実績
+                        </SelectItem>
+                        <SelectItem value="lastDetected">最終検出</SelectItem>
+                        <SelectItem value="rating">評価</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Select value={sortDir} onValueChange={(v) => setSortDir(v as ClientSortDir)}>
+                      <SelectTrigger
+                        id="client-sort-dir"
+                        className="h-9 w-[112px] bg-white dark:bg-zinc-950"
+                        aria-label="並び順（昇順・降順）"
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="desc">降順</SelectItem>
+                        <SelectItem value="asc">昇順</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="relative min-w-[200px] flex-1 lg:min-w-[220px] xl:w-72 xl:flex-none">
+                    <SearchIcon
+                      className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-zinc-400"
+                      aria-hidden
+                    />
+                    <Input
+                      value={clientSearchQuery}
+                      onChange={(e) => setClientSearchQuery(e.target.value)}
+                      placeholder="名前・PF・補足・求人タイトル…"
+                      className="bg-white pl-9 dark:bg-zinc-950"
+                      aria-label="クライアントを検索"
+                    />
+                  </div>
+                </div>
               </div>
             </CardHeader>
             {clientSearchQuery.trim() !== "" ? (
@@ -183,9 +268,19 @@ export default function ClientsAnalysisPage() {
                     <TableHead className="min-w-[180px]">クライアント</TableHead>
                     <TableHead className="min-w-[100px]">種別</TableHead>
                     <TableHead className="min-w-[72px]">PF</TableHead>
-                    <TableHead className="text-right">評価</TableHead>
+                    <TableHead
+                      className="text-right"
+                      aria-sort={ariaSortForColumn(sortKey, "rating", sortDir)}
+                    >
+                      評価
+                    </TableHead>
                     <TableHead className="min-w-[220px]">補足・詳細</TableHead>
-                    <TableHead className="min-w-[110px]">最終検出</TableHead>
+                    <TableHead
+                      className="min-w-[110px] text-right"
+                      aria-sort={ariaSortForColumn(sortKey, "lastDetected", sortDir)}
+                    >
+                      最終検出
+                    </TableHead>
                     <TableHead className="min-w-[72px]" />
                   </TableRow>
                 </TableHeader>
@@ -203,7 +298,7 @@ export default function ClientsAnalysisPage() {
                       </TableCell>
                     </TableRow>
                   ) : (
-                    filteredClients.map((c) => (
+                    displayedClients.map((c) => (
                       <ClientTableRow key={c.key} row={c} onOpenDetail={() => setDetailRow(c)} />
                     ))
                   )}
@@ -323,6 +418,24 @@ function ClientDetailModal({
               <div className="grid gap-1">
                 <dt className="text-xs font-medium uppercase tracking-wide text-zinc-500">検出に紐づく求人数</dt>
                 <dd className="font-medium tabular-nums text-zinc-900 dark:text-zinc-50">{row.jobCount}</dd>
+              </div>
+              <div className="grid gap-1">
+                <dt
+                  className="text-xs font-medium uppercase tracking-wide text-zinc-500"
+                  title="CrowdWorks は雇用者プロフィールの募集実績件数。Lancers は補足に「募集実績」が無い場合、一覧の発注数を代替します。"
+                >
+                  募集実績（プラットフォーム）
+                </dt>
+                <dd className="font-medium tabular-nums text-zinc-900 dark:text-zinc-50">
+                  {row.recruitmentAchievement != null ? (
+                    <>
+                      {row.recruitmentAchievement}
+                      <span className="ml-0.5 font-normal text-zinc-600 dark:text-zinc-400">件</span>
+                    </>
+                  ) : (
+                    <span className="font-normal text-zinc-400">—（未取得）</span>
+                  )}
+                </dd>
               </div>
               <div className="grid gap-1">
                 <dt className="text-xs font-medium uppercase tracking-wide text-zinc-500">{ordersLabel}</dt>
@@ -551,7 +664,7 @@ function ClientTableRow({ row, onOpenDetail }: { row: ClientAnalysisRow; onOpenD
           <span className="text-xs text-zinc-400">—</span>
         )}
       </TableCell>
-      <TableCell className="whitespace-nowrap text-xs text-zinc-500 tabular-nums">
+      <TableCell className="whitespace-nowrap text-right text-xs text-zinc-500 tabular-nums">
         {new Date(row.lastDetectedAt).toLocaleString()}
       </TableCell>
       <TableCell className="space-y-1">
