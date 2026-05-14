@@ -283,8 +283,27 @@ function parseClientListingMetaMerged(job: JobRow): ClientListingMeta | null {
   }
   if (!extrasLine && rawMeta?.extrasLine) extrasLine = rawMeta.extrasLine;
 
-  if (!ordersText && rating == null && !extrasLine) return null;
+  if (!ordersText && rating == null && !extrasLine) {
+    if (!hasJobClientSignals(job)) return null;
+    return { ordersText: null, rating: null, extrasLine: null };
+  }
   return { ordersText, rating, extrasLine };
+}
+
+function hasJobClientSignals(job: JobRow): boolean {
+  if (job.clientName?.trim()) return true;
+  if (typeof job.clientProfileUrl === "string" && job.clientProfileUrl.trim()) return true;
+  if (typeof job.clientOrders === "string" && job.clientOrders.trim()) return true;
+  if (job.clientRating != null && Number.isFinite(job.clientRating)) return true;
+  if (typeof job.clientExtrasSummary === "string" && job.clientExtrasSummary.trim()) return true;
+  const r = bridgedMonitorRaw(job.rawData);
+  if (!r) return false;
+  if (typeof r.client_name === "string" && r.client_name.trim()) return true;
+  if (typeof r.client_profile_url === "string" && r.client_profile_url.trim()) return true;
+  if (r.client_orders != null && String(r.client_orders).trim()) return true;
+  if (typeof r.client_rating === "number" && !Number.isNaN(r.client_rating)) return true;
+  if (typeof r.client_extras === "string" && r.client_extras.trim()) return true;
+  return false;
 }
 
 function isCrowdWorksJob(job: Pick<JobRow, "platform" | "projectUrl" | "rawData">): boolean {
@@ -328,10 +347,10 @@ function ClientMetaStrip({ job }: { job: JobRow }) {
   const meta = parseClientListingMetaMerged(job);
   if (!meta) return null;
   const { ordersText, rating, extrasLine } = meta;
-  if (!ordersText && rating == null && !extrasLine) return null;
   const cw = isCrowdWorksJob(job);
   const ordersTitle = cw ? "契約数（クライアント）" : "発注数（クライアント）";
   const ratingTitle = cw ? "総合評価（星）" : "評価（一覧カード）";
+  const ratingDisplay = rating ?? 0;
 
   return (
     <div className="flex flex-col gap-1">
@@ -345,15 +364,13 @@ function ClientMetaStrip({ job }: { job: JobRow }) {
             <span className="font-medium tabular-nums">{ordersText}</span>
           </span>
         ) : null}
-        {rating != null ? (
-          <span
-            className="inline-flex items-center gap-1 rounded-md border border-amber-500/35 bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-50"
-            title={ratingTitle}
-          >
-            <ClientRatingStars value={rating} />
-            <span className="font-semibold tabular-nums">{rating.toFixed(1)}</span>
-          </span>
-        ) : null}
+        <span
+          className="inline-flex items-center gap-1 rounded-md border border-amber-500/35 bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-50"
+          title={rating == null ? `${ratingTitle}（データなし · 0.0 として表示）` : ratingTitle}
+        >
+          <ClientRatingStars value={ratingDisplay} />
+          <span className="font-semibold tabular-nums">{ratingDisplay.toFixed(1)}</span>
+        </span>
       </div>
       {extrasLine ? (
         <div
@@ -393,16 +410,10 @@ function ClientCell({ job }: { job: JobRow }) {
     const bits: string[] = [];
     const cw = isCrowdWorksJob(job);
     if (m.ordersText) bits.push(`${cw ? "契約" : "発注"} ${m.ordersText}`);
-    if (m.rating != null) bits.push(`${cw ? "総合評価" : "評価"} ${m.rating}`);
+    bits.push(`${cw ? "総合評価" : "評価"} ${m.rating ?? 0}`);
     if (m.extrasLine) bits.push(m.extrasLine);
     return bits.length ? bits.join(" · ") : null;
-  }, [
-    job.rawData,
-    job.platform,
-    job.clientOrders,
-    job.clientRating,
-    job.clientExtrasSummary,
-  ]);
+  }, [job]);
   const profileUrl = resolveClientProfileUrl(job);
   const hasName = Boolean(displayName);
   const fullTitle = [displayName || null, metaPlain].filter(Boolean).join(" — ") || undefined;
