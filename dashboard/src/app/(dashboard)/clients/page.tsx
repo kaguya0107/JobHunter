@@ -1,10 +1,13 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { ExternalLinkIcon, UsersRoundIcon } from "lucide-react";
+import { ExternalLinkIcon, StarIcon, UserIcon, UsersRoundIcon } from "lucide-react";
+import * as React from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -14,7 +17,10 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { ClientExtrasInline } from "@/components/client-extras-inline";
+import { sanitizeClientExtrasText } from "@/lib/client-extras-text";
 import { absoluteProfileUrl, type ClientAnalysisRow, type ClientAnalysisSummary } from "@/lib/client-analysis";
+import { cn } from "@/lib/utils";
 
 type Payload = {
   summary: ClientAnalysisSummary;
@@ -33,15 +39,17 @@ export default function ClientsAnalysisPage() {
     },
   });
 
+  const [detailRow, setDetailRow] = React.useState<ClientAnalysisRow | null>(null);
+
   return (
     <div className="space-y-8">
       <header className="space-y-2">
         <div className="flex items-center gap-2">
           <UsersRoundIcon className="size-7 text-zinc-600 dark:text-zinc-300" aria-hidden />
-          <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-50">クライアント分析</h1>
+          <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-50">Client Analysis</h1>
         </div>
         <p className="text-sm text-zinc-500 dark:text-zinc-400">
-          検出求人に保存されている発注者・クライアント情報（名前、プロフィールURL、発注/契約数、評価、補足）を集約します。
+          検出求人に保存されている発注者・クライアント情報（名前、プロフィールURL、評価、補足）を集約します。
           {data?.scan?.limit != null ? (
             <span className="block pt-1 text-xs text-zinc-400">
               直近 <span className="tabular-nums font-medium">{data.scan.limit}</span>{" "}
@@ -79,12 +87,25 @@ export default function ClientsAnalysisPage() {
                 <CardTitle className="text-base">プラットフォーム別（スキャン内の求人）</CardTitle>
               </CardHeader>
               <CardContent className="flex flex-wrap gap-2">
-                {data.summary.platformMix.map((p) => (
-                  <Badge key={p.platform} variant="secondary" className="tabular-nums">
-                    {p.platform}
-                    <span className="ml-1.5 font-semibold">{p.jobCount}</span>
-                  </Badge>
-                ))}
+                {data.summary.platformMix
+                  .slice()
+                  .sort((a, b) => comparePlatformOrder(a.platform, b.platform))
+                  .map((p) => {
+                    const chip = platformChipStyles(p.platform);
+                    return (
+                      <span
+                        key={p.platform}
+                        title={chip.fullLabel}
+                        className={cn(
+                          "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs tabular-nums",
+                          chip.className,
+                        )}
+                      >
+                        <span className="font-semibold tracking-wide">{chip.abbr}</span>
+                        <span className="font-medium opacity-90">{p.jobCount}</span>
+                      </span>
+                    );
+                  })}
               </CardContent>
             </Card>
           ) : null}
@@ -93,18 +114,16 @@ export default function ClientsAnalysisPage() {
             <CardHeader>
               <CardTitle className="text-lg">クライアント一覧</CardTitle>
               <CardDescription>
-                プロフィールURLがある場合はそれで同一視し、無い場合は「プラットフォーム × 表示名」でまとめています。
+                プロフィールURLがある場合はそれで同一視し、無い場合は「プラットフォーム × 表示名」でまとめています。アバターまたは表示名をクリックすると詳細を表示します。
               </CardDescription>
             </CardHeader>
             <CardContent className="overflow-x-auto p-0 sm:p-6">
               <Table>
                 <TableHeader>
                   <TableRow className="hover:bg-transparent">
-                    <TableHead className="min-w-[140px]">表示名</TableHead>
+                    <TableHead className="min-w-[180px]">クライアント</TableHead>
                     <TableHead className="min-w-[100px]">種別</TableHead>
-                    <TableHead className="min-w-[160px]">プラットフォーム</TableHead>
-                    <TableHead className="text-right tabular-nums">求人件数</TableHead>
-                    <TableHead className="min-w-[120px]">発注/契約</TableHead>
+                    <TableHead className="min-w-[72px]">PF</TableHead>
                     <TableHead className="text-right">評価</TableHead>
                     <TableHead className="min-w-[220px]">補足・詳細</TableHead>
                     <TableHead className="min-w-[110px]">最終検出</TableHead>
@@ -114,12 +133,14 @@ export default function ClientsAnalysisPage() {
                 <TableBody>
                   {data.clients.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={9} className="text-center text-sm text-zinc-500">
+                      <TableCell colSpan={7} className="text-center text-sm text-zinc-500">
                         クライアント情報がまだありません。モニターから ingest された求人が溜まると表示されます。
                       </TableCell>
                     </TableRow>
                   ) : (
-                    data.clients.map((c) => <ClientTableRow key={c.key} row={c} />)
+                    data.clients.map((c) => (
+                      <ClientTableRow key={c.key} row={c} onOpenDetail={() => setDetailRow(c)} />
+                    ))
                   )}
                 </TableBody>
               </Table>
@@ -127,8 +148,266 @@ export default function ClientsAnalysisPage() {
           </Card>
         </>
       ) : null}
+      <ClientDetailModal
+        row={detailRow}
+        open={detailRow != null}
+        onOpenChange={(next) => {
+          if (!next) setDetailRow(null);
+        }}
+      />
     </div>
   );
+}
+
+function ClientAvatar({
+  src,
+  displayName,
+  size,
+}: {
+  src: string | null;
+  displayName: string;
+  size: "sm" | "lg";
+}) {
+  const [broken, setBroken] = React.useState(false);
+  const dim = size === "sm" ? "h-9 w-9" : "h-20 w-20";
+  if (src && !broken) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element -- 外部オリジン混在のため img で統一
+      <img
+        src={src}
+        alt=""
+        width={size === "sm" ? 36 : 80}
+        height={size === "sm" ? 36 : 80}
+        className={cn(dim, "shrink-0 rounded-full bg-zinc-200 object-cover dark:bg-zinc-800")}
+        onError={() => setBroken(true)}
+        referrerPolicy="no-referrer"
+      />
+    );
+  }
+  return (
+    <div
+      className={cn(
+        dim,
+        "flex shrink-0 items-center justify-center rounded-full bg-zinc-200 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400",
+      )}
+      title={displayName}
+      aria-hidden
+    >
+      <UserIcon className={size === "sm" ? "size-4" : "size-10"} />
+    </div>
+  );
+}
+
+function ClientDetailModal({
+  row,
+  open,
+  onOpenChange,
+}: {
+  row: ClientAnalysisRow | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  if (!row) return null;
+
+  const profileHref = absoluteProfileUrl(row.platforms, row.profilePath);
+  const kindLabel = row.kind === "profile" ? "プロフィール" : "名前のみ";
+  const extrasBody = (row.extrasFull ?? row.extrasPreview ?? "").trim();
+  const anyCrowd = row.platforms.some((p) => p.toLowerCase().includes("crowd"));
+  const ordersLabel = anyCrowd ? "契約数（一覧・プロフィール由来）" : "発注数（一覧・プロフィール由来）";
+  const ratingLabel = anyCrowd ? "評価（一覧・総合）" : "評価（一覧カード）";
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[min(90vh,820px)] max-w-xl gap-0 overflow-hidden p-0 sm:max-w-xl">
+        <ScrollArea className="max-h-[min(88vh,800px)]">
+          <div className="space-y-6 p-6 pt-10">
+            <DialogHeader className="space-y-4 text-left">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+                <ClientAvatar src={row.avatarUrl} displayName={row.displayName} size="lg" />
+                <div className="min-w-0 flex-1 space-y-1">
+                  <DialogTitle className="pr-8 text-xl leading-snug">{row.displayName}</DialogTitle>
+                  <DialogDescription className="text-sm">
+                    検出求人から集約したクライアント情報のスナップショットです。
+                  </DialogDescription>
+                </div>
+              </div>
+            </DialogHeader>
+
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="outline" className="font-normal">
+                種別: {kindLabel}
+              </Badge>
+              {[...row.platforms].sort(comparePlatformOrder).map((p) => {
+                const chip = platformChipStyles(p);
+                return (
+                  <span
+                    key={p}
+                    title={chip.fullLabel}
+                    className={cn(
+                      "rounded-md border px-2 py-0.5 text-xs font-semibold tracking-wide",
+                      chip.className,
+                    )}
+                  >
+                    {chip.abbr}
+                  </span>
+                );
+              })}
+            </div>
+
+            <dl className="grid gap-4 text-sm">
+              <div className="grid gap-1">
+                <dt className="text-xs font-medium uppercase tracking-wide text-zinc-500">検出に紐づく求人数</dt>
+                <dd className="font-medium tabular-nums text-zinc-900 dark:text-zinc-50">{row.jobCount}</dd>
+              </div>
+              <div className="grid gap-1">
+                <dt className="text-xs font-medium uppercase tracking-wide text-zinc-500">{ordersLabel}</dt>
+                <dd className="text-zinc-900 dark:text-zinc-50">{row.ordersDisplay?.trim() || "—"}</dd>
+              </div>
+              <div className="grid gap-1">
+                <dt className="text-xs font-medium uppercase tracking-wide text-zinc-500">{ratingLabel}</dt>
+                <dd>
+                  <span className="inline-flex flex-wrap items-center gap-2 tabular-nums">
+                    <ClientAnalysisRatingStars
+                      value={row.ratingDisplay ?? 0}
+                      unavailable={row.ratingDisplay == null}
+                    />
+                    <span className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
+                      {(row.ratingDisplay ?? 0).toFixed(1)}
+                    </span>
+                    <span className="text-zinc-500">/ 5</span>
+                  </span>
+                </dd>
+              </div>
+              {row.profilePath ? (
+                <div className="grid gap-1">
+                  <dt className="text-xs font-medium uppercase tracking-wide text-zinc-500">プロフィールパス</dt>
+                  <dd className="break-all font-mono text-xs text-zinc-600 dark:text-zinc-400">{row.profilePath}</dd>
+                </div>
+              ) : null}
+              <div className="grid gap-1">
+                <dt className="text-xs font-medium uppercase tracking-wide text-zinc-500">最終検出</dt>
+                <dd className="tabular-nums text-zinc-700 dark:text-zinc-300">
+                  {new Date(row.lastDetectedAt).toLocaleString()}
+                </dd>
+              </div>
+            </dl>
+
+            {extrasBody ? (
+              <div className="space-y-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">補足・詳細</p>
+                <div className="rounded-lg border border-zinc-200 bg-zinc-50/80 p-3 text-sm leading-relaxed text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-300">
+                  <ClientExtrasInline text={extrasBody} className="text-sm text-zinc-700 dark:text-zinc-300" />
+                </div>
+              </div>
+            ) : null}
+
+            <div className="flex flex-col gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-800 sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
+              {profileHref ? (
+                <a
+                  href={profileHref}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-sm font-medium text-sky-700 underline decoration-sky-700/35 underline-offset-2 hover:text-sky-600 dark:text-sky-400"
+                >
+                  プロフィールを開く
+                  <ExternalLinkIcon className="size-4 shrink-0 opacity-80" aria-hidden />
+                </a>
+              ) : null}
+              <a
+                href={row.latestJobUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex min-w-0 items-start gap-1.5 text-sm text-zinc-700 underline decoration-zinc-400/50 underline-offset-2 hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-100"
+              >
+                <span className="shrink-0 font-medium text-zinc-500 dark:text-zinc-400">最新検出求人:</span>
+                <span className="break-words">{row.latestJobTitle}</span>
+                <ExternalLinkIcon className="size-3.5 shrink-0 opacity-70" aria-hidden />
+              </a>
+            </div>
+          </div>
+        </ScrollArea>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Five stars on a 0–5 scale — fractional fill on the last active star。``unavailable`` のときは 0 塗り＋評価なし扱い。 */
+function ClientAnalysisRatingStars({
+  value,
+  unavailable,
+}: {
+  value: number;
+  unavailable?: boolean;
+}) {
+  const clamped = Math.max(0, Math.min(5, value));
+  const tip = unavailable ? "評価なし" : `評価 ${value.toFixed(1)} / 5`;
+  return (
+    <span className="inline-flex items-center gap-px" title={tip} role="img" aria-label={tip}>
+      {[0, 1, 2, 3, 4].map((i) => {
+        const low = i;
+        const high = i + 1;
+        let fillPct = 0;
+        if (clamped >= high) fillPct = 100;
+        else if (clamped > low) fillPct = (clamped - low) * 100;
+        return (
+          <span key={i} className="relative inline-flex size-3.5 shrink-0 overflow-hidden">
+            <StarIcon className="size-3.5 text-zinc-300 dark:text-zinc-600" aria-hidden />
+            {fillPct > 0 ? (
+              <span
+                className="pointer-events-none absolute left-0 top-0 h-full overflow-hidden"
+                style={{ width: `${fillPct}%` }}
+              >
+                <StarIcon className="size-3.5 fill-amber-400 text-amber-400" aria-hidden />
+              </span>
+            ) : null}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+/** CrowdWorks / Lancers を CW・LW に短縮。低彩度のストーン／スレート系で区別（フル名は title に）。 */
+function platformChipStyles(raw: string) {
+  const fullLabel = raw.trim() || "Unknown";
+  const t = fullLabel.toLowerCase();
+  if (t.includes("crowd")) {
+    return {
+      abbr: "CW",
+      fullLabel,
+      className:
+        "border-stone-300/60 bg-stone-100/95 text-stone-700 dark:border-stone-600/45 dark:bg-stone-900/55 dark:text-stone-300",
+    };
+  }
+  if (t.includes("lancer")) {
+    return {
+      abbr: "LW",
+      fullLabel,
+      className:
+        "border-slate-300/60 bg-slate-100/95 text-slate-700 dark:border-slate-600/45 dark:bg-slate-900/55 dark:text-slate-300",
+    };
+  }
+  const short =
+    fullLabel.length > 5 ? `${fullLabel.slice(0, 4)}…` : fullLabel || "—";
+  return {
+    abbr: short,
+    fullLabel,
+    className:
+      "border-zinc-200/90 bg-zinc-100/90 text-zinc-600 dark:border-zinc-700/70 dark:bg-zinc-800/70 dark:text-zinc-400",
+  };
+}
+
+function comparePlatformOrder(a: string, b: string): number {
+  const rank = (s: string) => {
+    const t = s.toLowerCase();
+    if (t.includes("lancer")) return 0;
+    if (t.includes("crowd")) return 1;
+    return 2;
+  };
+  const ra = rank(a);
+  const rb = rank(b);
+  if (ra !== rb) return ra - rb;
+  return a.localeCompare(b);
 }
 
 function MetricCard(props: { title: string; value: string; hint?: string }) {
@@ -143,41 +422,69 @@ function MetricCard(props: { title: string; value: string; hint?: string }) {
   );
 }
 
-function ClientTableRow({ row }: { row: ClientAnalysisRow }) {
+function ClientTableRow({ row, onOpenDetail }: { row: ClientAnalysisRow; onOpenDetail: () => void }) {
   const profileHref = absoluteProfileUrl(row.platforms, row.profilePath);
   const kindLabel = row.kind === "profile" ? "プロフィール" : "名前のみ";
 
   return (
     <TableRow className="align-top">
-      <TableCell className="font-medium text-zinc-900 dark:text-zinc-100">{row.displayName}</TableCell>
+      <TableCell>
+        <button
+          type="button"
+          onClick={onOpenDetail}
+          aria-label={`${row.displayName}の詳細を開く`}
+          className="flex min-w-0 max-w-[min(240px,40vw)] items-center gap-2.5 rounded-lg text-left outline-none ring-offset-2 transition hover:bg-zinc-100 focus-visible:ring-2 focus-visible:ring-zinc-400/80 dark:ring-offset-zinc-950 dark:hover:bg-zinc-900"
+        >
+          <ClientAvatar src={row.avatarUrl} displayName={row.displayName} size="sm" />
+          <span className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">{row.displayName}</span>
+        </button>
+      </TableCell>
       <TableCell>
         <Badge variant="outline" className="font-normal">
           {kindLabel}
         </Badge>
       </TableCell>
-      <TableCell className="text-xs text-zinc-600 dark:text-zinc-400">
+      <TableCell className="text-xs">
         <div className="flex flex-wrap gap-1">
-          {row.platforms.map((p) => (
-            <span key={p} className="rounded bg-zinc-100 px-1.5 py-0.5 dark:bg-zinc-800">
-              {p}
-            </span>
-          ))}
+          {[...row.platforms].sort(comparePlatformOrder).map((p) => {
+            const chip = platformChipStyles(p);
+            return (
+              <span
+                key={p}
+                title={chip.fullLabel}
+                className={cn(
+                  "rounded border px-1.5 py-0.5 text-[11px] font-semibold tracking-wide",
+                  chip.className,
+                )}
+              >
+                {chip.abbr}
+              </span>
+            );
+          })}
         </div>
       </TableCell>
-      <TableCell className="text-right tabular-nums font-medium">{row.jobCount}</TableCell>
-      <TableCell className="tabular-nums text-sm text-zinc-700 dark:text-zinc-300">
-        {row.ordersDisplay ?? "—"}
-      </TableCell>
-      <TableCell className="text-right tabular-nums text-sm">
-        {row.ratingDisplay != null ? row.ratingDisplay.toFixed(1) : "—"}
+      <TableCell className="text-right align-middle">
+        <span className="inline-flex items-center justify-end gap-1.5 tabular-nums">
+          <ClientAnalysisRatingStars
+            value={row.ratingDisplay ?? 0}
+            unavailable={row.ratingDisplay == null}
+          />
+          <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+            {(row.ratingDisplay ?? 0).toFixed(1)}
+          </span>
+        </span>
       </TableCell>
       <TableCell className="max-w-[320px]">
-        <p
-          className="line-clamp-3 text-xs leading-relaxed text-zinc-600 dark:text-zinc-400"
-          title={row.extrasPreview ?? undefined}
-        >
-          {row.extrasPreview ?? "—"}
-        </p>
+        {row.extrasPreview?.trim() ? (
+          <div
+            className="line-clamp-3 leading-relaxed text-zinc-600 dark:text-zinc-400"
+            title={sanitizeClientExtrasText(row.extrasPreview.trim())}
+          >
+            <ClientExtrasInline text={row.extrasPreview} compact className="text-xs text-zinc-600 dark:text-zinc-400" />
+          </div>
+        ) : (
+          <span className="text-xs text-zinc-400">—</span>
+        )}
       </TableCell>
       <TableCell className="whitespace-nowrap text-xs text-zinc-500 tabular-nums">
         {new Date(row.lastDetectedAt).toLocaleString()}

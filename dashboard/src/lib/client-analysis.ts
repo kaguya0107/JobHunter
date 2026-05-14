@@ -36,6 +36,8 @@ export type ClientAnalysisRow = {
   ordersDisplay: string | null;
   ratingDisplay: number | null;
   extrasPreview: string | null;
+  /** 補足全文（一覧は ``extrasPreview`` の短い版） */
+  extrasFull: string | null;
   avatarUrl: string | null;
 };
 
@@ -97,7 +99,10 @@ type MutableAgg = {
   latestJobUrl: string;
   ordersDisplay: string | null;
   ratingDisplay: number | null;
+  /** 一覧・表用（抜粋） */
   extrasPreview: string | null;
+  /** 最新検出求人に紐づく補足全文（詳細 UI 向け） */
+  extrasFull: string | null;
   avatarUrl: string | null;
 };
 
@@ -138,6 +143,7 @@ export function aggregateClientAnalysis(rows: DetectedJobClientInput[]): {
             ? row.clientRating
             : null,
         extrasPreview: row.clientExtrasSummary?.trim().slice(0, 600) || null,
+        extrasFull: row.clientExtrasSummary?.trim() || null,
         avatarUrl: row.clientAvatarUrl?.trim() || null,
       };
       map.set(aggKey, agg);
@@ -159,7 +165,10 @@ export function aggregateClientAnalysis(rows: DetectedJobClientInput[]): {
           ? row.clientRating
           : agg.ratingDisplay;
       const ex = row.clientExtrasSummary?.trim();
-      agg.extrasPreview = ex ? ex.slice(0, 600) : agg.extrasPreview;
+      if (ex) {
+        agg.extrasPreview = ex.slice(0, 600);
+        agg.extrasFull = ex;
+      }
       const av = row.clientAvatarUrl?.trim();
       agg.avatarUrl = av || agg.avatarUrl;
     }
@@ -195,6 +204,7 @@ export function aggregateClientAnalysis(rows: DetectedJobClientInput[]): {
       ordersDisplay: c.ordersDisplay,
       ratingDisplay: c.ratingDisplay,
       extrasPreview: c.extrasPreview,
+      extrasFull: c.extrasFull,
       avatarUrl: c.avatarUrl,
     }));
 

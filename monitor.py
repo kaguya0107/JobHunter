@@ -585,6 +585,20 @@ def parse_client(card: BeautifulSoup) -> tuple[str, str | None, str, str | None,
         name = note.get_text(strip=True)
         href = note.get("href")
 
+    if not href:
+        wrap = card.select_one('a.p-search-job-media__avatar-image-wrapper[href^="/client/"]')
+        if wrap:
+            href = wrap.get("href")
+            img0 = wrap.select_one("img.c-avatar__image")
+            if img0:
+                name = (
+                    (img0.get("alt") or "").strip()
+                    or (img0.get("title") or "").strip()
+                    or name
+                )
+            if not name:
+                name = wrap.get_text(strip=True)
+
     img = card.select_one("div.p-search-job-media__avatar img.c-avatar__image")
     avatar_src = img.get("src") if img else None
     avatar_url = absolutize_lancers_asset(avatar_src)
@@ -1452,10 +1466,6 @@ def enrich_lancers_jobs_with_client_profiles(session: requests.Session, jobs: li
         if isinstance(clancers, int) and clancers > 0:
             extras_parts.append(f"継続ランサー {clancers}人")
 
-        ind = stats.get("preferred_industry")
-        if isinstance(ind, str) and ind.strip():
-            extras_parts.append(f"発注したい業種: {ind.strip()}")
-
         _append_lancers_client_extras(job, extras_parts)
 
 
@@ -1555,9 +1565,9 @@ def parse_listings(page_html: str, listing_url: str) -> list[JobListing]:
         return parse_crowdworks_listings(page_html, listing_url)
     soup = BeautifulSoup(page_html, "html.parser")
     out: list[JobListing] = []
-    carousel_cards = soup.select("div.p-search-job__latest-carousel-item.c-media")
+    # 新着カルーセル行には発注者・/client/ リンクが無い。取り込むと client が空のまま DB / Discord に載るため除外する。
     main_cards = soup.select("div.p-search-job-media.c-media")
-    cards = main_cards + carousel_cards
+    cards = main_cards
     seen_on_page: set[str] = set()
     for card in cards:
         title_a = _listing_card_title_anchor(card)

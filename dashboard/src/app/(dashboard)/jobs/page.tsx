@@ -53,6 +53,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { motion } from "framer-motion";
 
+import { ClientExtrasInline } from "@/components/client-extras-inline";
+import { sanitizeClientExtrasText } from "@/lib/client-extras-text";
 import { cn } from "@/lib/utils";
 import { PostingSourceBadges } from "@/components/posting-source-badges";
 
@@ -179,7 +181,7 @@ function extractRatingFromExtras(extras: string): number | null {
 
 /** Remove duplicate 発注/評価 fragments so we do not repeat chips in the subtitle. */
 function extrasLineAfterChips(extras: string, ordersText: string | null, rating: number | null): string | null {
-  let t = extras.trim().replace(/\s+/g, " ");
+  let t = sanitizeClientExtrasText(extras.trim()).replace(/\s+/g, " ");
   if (!t) return null;
 
   // Drop "発注 N" if chip shows the same count
@@ -354,9 +356,12 @@ function ClientMetaStrip({ job }: { job: JobRow }) {
         ) : null}
       </div>
       {extrasLine ? (
-        <p className="line-clamp-2 text-[10px] leading-snug text-zinc-500 dark:text-zinc-400" title={extrasLine}>
-          {extrasLine}
-        </p>
+        <div
+          className="line-clamp-2 text-[10px] leading-snug text-zinc-500 dark:text-zinc-400"
+          title={extrasLine}
+        >
+          <ClientExtrasInline text={extrasLine} compact className="text-zinc-500 dark:text-zinc-400" />
+        </div>
       ) : null}
     </div>
   );
@@ -1091,7 +1096,12 @@ export default function JobsPage() {
                   label="Client details"
                   value={
                     detail.clientExtrasSummary?.trim() ? (
-                      <span className="block whitespace-pre-wrap font-normal">{detail.clientExtrasSummary}</span>
+                      <span className="block whitespace-pre-wrap font-normal">
+                        <ClientExtrasInline
+                          text={detail.clientExtrasSummary}
+                          className="text-sm text-zinc-800 dark:text-zinc-100"
+                        />
+                      </span>
                     ) : (
                       "—"
                     )
