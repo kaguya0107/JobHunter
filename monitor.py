@@ -17,6 +17,8 @@ Configure with environment variables:
   CROWDWORKS_URLS                     Search URLs. Default when this key is **absent**: category **226** (システム) + **230** (Web) with ``order=new``.
                                           Set ``CROWDWORKS_URLS`` to an empty value to disable CrowdWorks listings.
   CROWDWORKS_DISCORD_WEBHOOK_URLS     Space-separated Discord webhooks, **one per CROWDWORKS_URLS URL** (same order).
+  CROWDWORKS_FETCH_EMPLOYER_PROFILE     If falsy only: skip GET ``/public/employers/{id}`` enrichment (default on). Listing JSON exposes sparse ``client``; stars and「募集実績・完了・契約・完了率」derive from employer profile payloads.
+  CROWDWORKS_PROFILE_CACHE_SECONDS     Seconds to memoize parsed employer payloads per user id (default ``3600``). Set ``0`` to disable caching.
 
   DASHBOARD_INGEST            If "1"/"true"/"yes", POST poll results to the Job Hunter dashboard API.
   DASHBOARD_INGEST_URL        Base URL of the dashboard **Next.js origin only** — no trailing path (e.g. ``http://127.0.0.1:3000`` or ``https://your-app.vercel.app``). POST target is ``{base}/api/internal/ingest``. If Next uses ``basePath`` (subpath deployment), include that path in this URL (e.g. ``https://host/jobhunter``). Requires ``DASHBOARD_INGEST_SECRET``.
@@ -75,6 +77,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
+from typing import Any
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -713,6 +716,422 @@ def absolutize_crowdworks_asset(url: str | None) -> str | None:
     return urljoin("https://crowdworks.jp/", u.lstrip("/"))
 
 
+def _cw_dict(*candidates: object) -> dict | None:
+    for c in candidates:
+        if isinstance(c, dict) and c:
+            return c
+    return None
+
+
+def _cw_project_entry(row: dict) -> dict:
+    """Resolve ``project_entry`` across known CrowdWorks search JSON shapes."""
+    entry = row.get("entry")
+    if isinstance(entry, dict):
+        pe = entry.get("project_entry")
+        if isinstance(pe, dict):
+            return pe
+    pe2 = row.get("project_entry")
+    if isinstance(pe2, dict):
+        return pe2
+    return {}
+
+
+def _cw_client_display_name(client: dict, row: dict) -> str:
+    for key in ("username", "display_name", "name", "nickname", "screen_name", "company_name"):
+        v = client.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    emp = _cw_dict(row.get("employer"))
+    if emp:
+        for key in ("display_name", "username", "name", "company_name"):
+            v = emp.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return ""
+
+
+def _cw_client_uid(client: dict, row: dict) -> int | None:
+    for obj in (client, _cw_dict(row.get("employer")), row):
+        if not isinstance(obj, dict):
+            continue
+        for key in ("user_id", "id", "employer_id", "client_id"):
+            v = obj.get(key)
+            if v is None:
+                continue
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _cw_rating_from_payload(client: dict, row: dict, jo: dict) -> float | None:
+    """Average rating on ~0–5 scale from search / job-offer JSON (field names vary by CW version)."""
+    rating_keys = (
+        "average_rating",
+        "average_score",
+        "rating",
+        "evaluation_rating",
+        "employer_rating",
+        "review_score",
+        "client_rating",
+        "star_rating",
+    )
+    for obj in (
+        client,
+        jo,
+        _cw_dict(row.get("employer")),
+        row,
+        _cw_dict(row.get("client_stats")),
+    ):
+        if not isinstance(obj, dict):
+            continue
+        for k in rating_keys:
+            v = obj.get(k)
+            if isinstance(v, bool):
+                continue
+            if isinstance(v, (int, float)):
+                f = float(v)
+                if 0.0 <= f <= 5.0:
+                    return f
+            if isinstance(v, str) and v.strip():
+                try:
+                    f = float(v.strip().replace(",", "."))
+                    if 0.0 <= f <= 5.0:
+                        return f
+                except ValueError:
+                    pass
+    return None
+
+
+def _cw_orders_text(row: dict, project_entry: dict, client: dict) -> str | None:
+    num_c = project_entry.get("num_contracts")
+    if num_c is not None:
+        return str(int(num_c)) if isinstance(num_c, (int, float)) else str(num_c)
+    for obj in (project_entry, client, row, _cw_dict(row.get("employer"))):
+        if not isinstance(obj, dict):
+            continue
+        for key in (
+            "num_contracts",
+            "contract_count",
+            "total_contracts",
+            "completed_contracts",
+            "job_offer_achievement_count",
+        ):
+            v = obj.get(key)
+            if v is None:
+                continue
+            try:
+                return str(int(v))
+            except (TypeError, ValueError):
+                if isinstance(v, str) and v.strip().isdigit():
+                    return v.strip()
+    return None
+
+
+def _cw_completion_rate_pct(row: dict, client: dict) -> int | None:
+    """Optional completion rate (0–100) for UI / rawData."""
+    for obj in (client, row, _cw_dict(row.get("employer"))):
+        if not isinstance(obj, dict):
+            continue
+        for key in ("project_completion_rate", "completion_rate", "contract_completion_rate"):
+            v = obj.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                n = int(round(float(v)))
+                if 0 <= n <= 100:
+                    return n
+            if isinstance(v, str) and v.strip().replace(".", "").isdigit():
+                try:
+                    n = int(round(float(v.strip())))
+                    if 0 <= n <= 100:
+                        return n
+                except ValueError:
+                    pass
+    return None
+
+
+def _lancers_metrics_regex_fallback(card: Tag) -> tuple[str | None, float | None]:
+    """When subnote selectors miss (markup change), recover 発注 / 評価 from card text."""
+    text = card.get_text(" ", strip=True)
+    if not text:
+        return None, None
+    orders: str | None = None
+    rating: float | None = None
+    mo = re.search(r"発注\s*([\d,]+)", text)
+    if mo:
+        orders = mo.group(1).replace(",", "")
+    mr = re.search(r"評価\s*([\d.,]+)", text)
+    if mr:
+        try:
+            rating = float(mr.group(1).replace(",", "."))
+        except ValueError:
+            rating = None
+    return orders, rating
+
+
+CW_EMPLOYER_URL_ID_RE = re.compile(r"(?:/+|^)(?:public/)?employers/(\d+)(?:[^\d]|$)", re.IGNORECASE)
+_CROWDWORKS_EMPLOYER_STATS_CACHE_V1: dict[int, tuple[float, dict[str, Any]]] = {}
+
+
+def crowdworks_extract_employer_user_id(profile_href: str | None) -> int | None:
+    """Parse employer user id from a relative `/public/employers/{id}` or absolute CrowdWorks URL."""
+    if not profile_href or not isinstance(profile_href, str):
+        return None
+    s = profile_href.strip()
+    m = CW_EMPLOYER_URL_ID_RE.search(s.replace("\\", "/"))
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+def job_detail_url_is_crowdworks(detail_url: str) -> bool:
+    host = (urlparse(detail_url).hostname or "").lower()
+    return host.endswith("crowdworks.jp")
+
+
+def _crowdworks_profile_cache_ttl_s() -> float:
+    raw = os.environ.get("CROWDWORKS_PROFILE_CACHE_SECONDS", "3600").strip()
+    try:
+        n = float(raw)
+        return max(60.0, n) if n > 0 else 0.0
+    except ValueError:
+        return 3600.0
+
+
+def parse_crowdworks_employer_profile_stats(page_html: str) -> dict[str, Any] | None:
+    """
+    Extract aggregate client metrics from CrowdWorks ``/public/employers/{id}`` HTML payload.
+
+    The search-result ``#vue-container`` JSON exposes only sparse ``client``; the employer page embeds
+    ``employer_profile_json.employer_user`` with ratings (総合評価), recruitment history
+    ``job_offer_achievement_count``, and ``project_finished_data`` for 完了/契約/完了率.
+    """
+    soup = BeautifulSoup(page_html, "html.parser")
+    vc = soup.select_one("#vue-container")
+    if not vc:
+        return None
+    raw_data = vc.get("data") or ""
+    try:
+        payload = json.loads(html.unescape(raw_data))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    prof = payload.get("employer_profile_json")
+    eu = None
+    if isinstance(prof, dict):
+        eu = prof.get("employer_user")
+    if not isinstance(eu, dict):
+        eu = {}
+
+    fb = eu.get("feedback")
+    fb = fb if isinstance(fb, dict) else {}
+    pfd = eu.get("project_finished_data")
+    pfd = pfd if isinstance(pfd, dict) else {}
+
+    def _clamp_star(v: float) -> float:
+        return float(max(0.0, min(5.0, v)))
+
+    rating: float | None = None
+    sc_raw = fb.get("average_score")
+    if isinstance(sc_raw, bool):
+        sc_raw = None
+    elif isinstance(sc_raw, (int, float)):
+        try:
+            fv = float(sc_raw)
+            if not math.isnan(fv):
+                rating = _clamp_star(fv)
+        except (TypeError, ValueError):
+            pass
+    elif isinstance(sc_raw, str) and sc_raw.strip():
+        try:
+            fv = float(sc_raw.strip().replace(",", "."))
+            if not math.isnan(fv):
+                rating = _clamp_star(fv)
+        except ValueError:
+            pass
+
+    def _positive_int(raw: Any) -> int | None:
+        if isinstance(raw, bool) or raw is None:
+            return None
+        if isinstance(raw, int):
+            return raw if raw >= 0 else None
+        if isinstance(raw, float) and math.isfinite(raw):
+            ir = int(raw)
+            return ir if ir >= 0 and abs(float(ir) - raw) < 1e-6 else None
+        if isinstance(raw, str) and raw.strip().replace(",", "").replace(".", "").isdigit():
+            try:
+                return int(round(float(raw.strip().replace(",", ""))))
+            except ValueError:
+                return None
+        return None
+
+    n_ratings = _positive_int(fb.get("total_count"))
+    if rating is not None:
+        # No substantive reviews → treat as unrated despite placeholder scores.
+        if rating <= 0 or (n_ratings is not None and n_ratings <= 0):
+            rating = None
+
+    achievement = _positive_int(eu.get("job_offer_achievement_count"))
+    # CrowdWorks ``project_finished_data`` uses English keys; the JP 「完了／契約」pair lines up
+    # with these counts so 「完了」≤「契約」 in typical data (not ``finished``⇒完了 literally).
+    total_acceptance_count = _positive_int(pfd.get("total_acceptance_count"))
+    total_finished_count = _positive_int(pfd.get("total_finished_count"))
+    cmp_raw = pfd.get("rate")
+    completion_pct: int | None = None
+    if isinstance(cmp_raw, (int, float)) and not isinstance(cmp_raw, bool) and math.isfinite(float(cmp_raw)):
+        completion_pct = int(round(float(cmp_raw)))
+        if completion_pct < 0 or completion_pct > 100:
+            completion_pct = None
+    elif isinstance(cmp_raw, str) and cmp_raw.strip().replace(".", "").isdigit():
+        try:
+            n = int(round(float(cmp_raw.strip())))
+            if 0 <= n <= 100:
+                completion_pct = n
+        except ValueError:
+            completion_pct = None
+
+    dn = eu.get("display_name")
+    display_name = dn.strip() if isinstance(dn, str) else None
+
+    img = eu.get("profile_image_src")
+    profile_image_src = img.strip() if isinstance(img, str) and img.strip() else None
+
+    if (
+        rating is None
+        and achievement is None
+        and total_acceptance_count is None
+        and total_finished_count is None
+        and completion_pct is None
+        and not display_name
+        and not profile_image_src
+    ):
+        return None
+
+    out: dict[str, Any] = {
+        "average_rating": rating,
+        "job_offer_achievement_count": achievement,
+        "total_acceptance_count": total_acceptance_count,
+        "total_finished_count": total_finished_count,
+        "completion_rate_pct": completion_pct,
+        "display_name": display_name or None,
+        "profile_image_src": profile_image_src,
+    }
+    return out
+
+
+def _crowdworks_get_cached_profile_stats(uid: int, now_u: float) -> dict[str, Any] | None:
+    tup = _CROWDWORKS_EMPLOYER_STATS_CACHE_V1.get(uid)
+    if not tup:
+        return None
+    ttl = _crowdworks_profile_cache_ttl_s()
+    if ttl <= 0:
+        _CROWDWORKS_EMPLOYER_STATS_CACHE_V1.pop(uid, None)
+        return None
+    ts, cached = tup
+    if (now_u - ts) > ttl:
+        return None
+    return cached
+
+
+def _crowdworks_set_cached_profile_stats(uid: int, now_u: float, stats: dict[str, Any] | None) -> None:
+    if stats is not None:
+        _CROWDWORKS_EMPLOYER_STATS_CACHE_V1[uid] = (now_u, stats)
+
+
+def fetch_crowdworks_employer_profile_stats_cached(
+    session: requests.Session, employer_user_id: int, timeout: float
+) -> dict[str, Any] | None:
+    now_u = time.time()
+    cached = _crowdworks_get_cached_profile_stats(employer_user_id, now_u)
+    if cached is not None:
+        return cached
+    url = f"https://crowdworks.jp/public/employers/{employer_user_id}"
+    try:
+        page = fetch_html(session, url, timeout)
+    except requests.RequestException:
+        LOG.debug("CrowdWorks: employer profile fetch failed for user_id=%s", employer_user_id, exc_info=True)
+        return None
+    stats = parse_crowdworks_employer_profile_stats(page)
+    if stats:
+        _crowdworks_set_cached_profile_stats(employer_user_id, now_u, stats)
+    return stats
+
+
+def enrich_crowdworks_jobs_with_employer_profiles(session: requests.Session, jobs: list[JobListing], timeout: float) -> None:
+    """
+    Hydrate CrowdWorks client metrics from `/public/employers/{id}` when the listing JSON lacks them.
+
+    Controlled by ``CROWDWORKS_FETCH_EMPLOYER_PROFILE`` (default: on). One GET per distinct employer ID per TTL window.
+    """
+    if not env_bool("CROWDWORKS_FETCH_EMPLOYER_PROFILE", True):
+        return
+    if not jobs:
+        return
+    need: dict[int, None] = {}
+    for job in jobs:
+        if not job.detail_url.strip() or not job_detail_url_is_crowdworks(job.detail_url):
+            continue
+        uid = crowdworks_extract_employer_user_id(job.client_profile_url)
+        if uid is None:
+            continue
+        need[uid] = None
+    if not need:
+        return
+    fetched: dict[int, dict[str, Any] | None] = {}
+    for uid in need:
+        st = fetch_crowdworks_employer_profile_stats_cached(session, uid, timeout)
+        fetched[uid] = st if isinstance(st, dict) else None
+
+    for job in jobs:
+        if not job.detail_url.strip() or not job_detail_url_is_crowdworks(job.detail_url):
+            continue
+        uid = crowdworks_extract_employer_user_id(job.client_profile_url)
+        if uid is None:
+            continue
+        s = fetched.get(uid)
+        if not s:
+            continue
+        dn = s.get("display_name")
+        if isinstance(dn, str) and dn.strip():
+            job.client_name = dn.strip()
+        imgs = s.get("profile_image_src")
+        au = absolutize_crowdworks_asset(imgs) if isinstance(imgs, str) and imgs.strip() else None
+        if au and not (job.client_avatar_url or "").strip():
+            job.client_avatar_url = au
+        avg = s.get("average_rating")
+        if isinstance(avg, bool):
+            avg = None
+        if isinstance(avg, (int, float)) and math.isfinite(float(avg)):
+            job.client_rating = float(max(0.0, min(5.0, float(avg))))
+        # 「完了」= ``total_acceptance_count``, 「契約」= ``total_finished_count`` (CrowdWorks JP UI).
+        kanryo = s.get("total_acceptance_count")
+        keiyaku = s.get("total_finished_count")
+        if isinstance(keiyaku, int):
+            job.client_orders = str(keiyaku)
+        ach = s.get("job_offer_achievement_count")
+        pct = s.get("completion_rate_pct")
+        cw_bits: list[str] = []
+        if isinstance(ach, int):
+            cw_bits.append(f"募集実績 {ach}")
+        if isinstance(kanryo, int):
+            cw_bits.append(f"完了 {kanryo}")
+        if isinstance(keiyaku, int):
+            cw_bits.append(f"契約 {keiyaku}")
+        if isinstance(pct, int) and 0 <= pct <= 100:
+            cw_bits.append(f"完了率 {pct}%")
+        if cw_bits:
+            line = " · ".join(cw_bits)
+            ex = job.client_extras.strip()
+            if not ex:
+                job.client_extras = line
+            elif line not in ex:
+                job.client_extras = f"{ex} · {line}" if ex else line
+
+
 def parse_crowdworks_listings(page_html: str, listing_url: str) -> list[JobListing]:
     """Parse embedded ``#vue-container`` JSON from CrowdWorks search (first result page)."""
     soup = BeautifulSoup(page_html, "html.parser")
@@ -733,7 +1152,11 @@ def parse_crowdworks_listings(page_html: str, listing_url: str) -> list[JobListi
     offers = (payload.get("searchResult") or {}).get("job_offers") or []
     out: list[JobListing] = []
     for row in offers:
+        if not isinstance(row, dict):
+            continue
         jo = row.get("job_offer") or {}
+        if not isinstance(jo, dict):
+            jo = {}
         jid = jo.get("id")
         if jid is None:
             continue
@@ -745,8 +1168,11 @@ def parse_crowdworks_listings(page_html: str, listing_url: str) -> list[JobListi
         title = " ".join((jo.get("title") or "").split())
         summary = " ".join((jo.get("description_digest") or "").split())
         client = row.get("client") or {}
-        uid = client.get("user_id")
-        uname = (client.get("username") or "").strip()
+        if not isinstance(client, dict):
+            client = {}
+
+        uname = _cw_client_display_name(client, row)
+        uid = _cw_client_uid(client, row)
         avatar = absolutize_crowdworks_asset((client.get("user_picture_url") or "").strip() or None)
         profile_href: str | None
         try:
@@ -754,9 +1180,14 @@ def parse_crowdworks_listings(page_html: str, listing_url: str) -> list[JobListi
         except (TypeError, ValueError):
             profile_href = None
 
-        entry = (row.get("entry") or {}).get("project_entry") or {}
-        num_c = entry.get("num_contracts")
-        orders = str(num_c) if num_c is not None else None
+        project_entry = _cw_project_entry(row)
+        orders = _cw_orders_text(row, project_entry, client)
+        cw_rating = _cw_rating_from_payload(client, row, jo)
+        completion = _cw_completion_rate_pct(row, client)
+        extras_parts: list[str] = []
+        if completion is not None:
+            extras_parts.append(f"完了率 {completion}%")
+        client_extras = " · ".join(extras_parts) if extras_parts else ""
 
         payment = row.get("payment")
         budget = crowdworks_payment_summary(payment if isinstance(payment, dict) else None)
@@ -770,12 +1201,12 @@ def parse_crowdworks_listings(page_html: str, listing_url: str) -> list[JobListi
                 detail_url=detail,
                 client_name=uname,
                 client_profile_url=profile_href,
-                client_extras="",
+                client_extras=client_extras,
                 source_listing_url=listing_url,
                 listing_summary=summary,
                 client_avatar_url=avatar,
                 client_orders=orders,
-                client_rating=None,
+                client_rating=cw_rating,
             )
         )
     return out
@@ -819,6 +1250,11 @@ def parse_listings(page_html: str, listing_url: str) -> list[JobListing]:
         title_text = " ".join(title_a.get_text(separator=" ", strip=True).split())
         budget = parse_budget(card)
         cname, chref, extras, cavatar, corders, crating = parse_client(card)
+        fb_orders, fb_rating = _lancers_metrics_regex_fallback(card)
+        if corders is None and fb_orders is not None:
+            corders = fb_orders
+        if crating is None and fb_rating is not None:
+            crating = fb_rating
         detail = urljoin("https://www.lancers.jp/", href.lstrip("/"))
         listing_summary = parse_listing_summary_text(card)
         out.append(
@@ -852,6 +1288,7 @@ def fetch_live_listings_snapshot(session: requests.Session, urls: list[str], tim
                 continue
             keyed.add(k)
             merged.append(job)
+    enrich_crowdworks_jobs_with_employer_profiles(session, merged, timeout)
     return merged
 
 
@@ -1050,6 +1487,7 @@ def job_to_discord_embed(job: JobListing) -> dict:
 
     du = urlparse(job.detail_url)
     intro, embed_color, author_block, footer_block = _discord_platform_branding(job.detail_url)
+    is_cw = job_detail_url_is_crowdworks(job.detail_url)
     desc_lines = [
         intro,
         "",
@@ -1064,15 +1502,22 @@ def job_to_discord_embed(job: JobListing) -> dict:
             pf = urljoin(base + "/", ch.lstrip("/"))
         desc_lines.append(f"[プロフィールを開く]({pf})")
 
+    orders_label = "契約数" if is_cw else "発注数"
     if job.client_orders:
-        desc_lines.append(f"📦 **発注数:** `{job.client_orders}`")
+        desc_lines.append(f"📦 **{orders_label}:** `{job.client_orders}`")
     else:
-        desc_lines.append("📦 **発注数:** —")
+        desc_lines.append(f"📦 **{orders_label}:** —")
 
+    rating_heading = "総合評価" if is_cw else "評価"
     if job.client_rating is not None:
-        desc_lines.append(f"⭐ **評価:** {format_rating_with_stars(job.client_rating)}")
+        desc_lines.append(f"⭐ **{rating_heading}:** {format_rating_with_stars(job.client_rating)}")
     else:
-        desc_lines.append("⭐ **評価:** —")
+        desc_lines.append(f"⭐ **{rating_heading}:** —")
+
+    ex = job.client_extras.strip()
+    if is_cw and ex:
+        desc_lines.append("")
+        desc_lines.append(f"📊 {ex}")
 
     description = "\n".join(desc_lines)
     if len(description) > 4096:
@@ -1426,6 +1871,8 @@ def run_poll(
             if job.work_id not in all_from_round:
                 ordered_ids.append(job.work_id)
                 all_from_round[job.work_id] = job
+
+    enrich_crowdworks_jobs_with_employer_profiles(session, list(all_from_round.values()), timeout)
 
     new_entries = []
     buckets = monitor_category_buckets(urls)
