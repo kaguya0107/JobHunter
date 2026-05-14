@@ -29,6 +29,7 @@ export type ClientAnalysisRow = {
   profilePath: string | null;
   displayName: string;
   platforms: string[];
+  /** 当スキャン内でこのクライアントキーに紐づく検出求人件数（募集実績ソートとは別） */
   jobCount: number;
   lastDetectedAt: string;
   latestJobTitle: string;
@@ -36,9 +37,14 @@ export type ClientAnalysisRow = {
   ordersDisplay: string | null;
   ratingDisplay: number | null;
   extrasPreview: string | null;
-  /** 補足全文（一覧は ``extrasPreview`` の短い版） */
+  /** 最新検出求人に紐づく補足全文（詳細 UI 向け） */
   extrasFull: string | null;
   avatarUrl: string | null;
+  /**
+   * CrowdWorks: 補足の「募集実績 N」。Lancers: 同文言が無い場合は発注数（一覧の発注数）を数値化したもの。
+   * 取得できない場合は null（ソートでは欠損扱い）。
+   */
+  recruitmentAchievement: number | null;
 };
 
 /** Canonical path for grouping (``/client/foo``, ``/public/employers/123``). */
@@ -56,6 +62,57 @@ export function normalizeProfileKey(raw: string | null | undefined): string | nu
   const path = t.startsWith("/") ? t : `/${t}`;
   const trimmed = path.replace(/\/+$/, "") || "/";
   return trimmed === "/" ? null : trimmed;
+}
+
+/** CrowdWorks 等の補足に含まれる「募集実績 N」から N を抽出する。 */
+export function parseRecruitmentAchievementFromExtras(text: string | null | undefined): number | null {
+  if (!text?.trim()) return null;
+  const m = /募集実績\s*[:：]?\s*([\d,\s]+)/.exec(text);
+  if (!m?.[1]) return null;
+  const n = parseInt(m[1].replace(/[\s,]/g, ""), 10);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/** Lancers の発注数（数字のみの文字列）を整数化。単位などが混じるときは null。 */
+function parseLancersOrderDisplayAsCount(raw: string | null | undefined): number | null {
+  if (!raw?.trim()) return null;
+  const t = raw.trim().replace(/[\s,]/g, "");
+  if (!/^\d+$/.test(t)) return null;
+  const n = parseInt(t, 10);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/** プラットフォーム別のヒューリスティックで「募集実績」相当の数値をひとつにまとめる。 */
+export function aggregatedRecruitmentAchievement(row: {
+  platforms: Iterable<string>;
+  extrasFull: string | null;
+  extrasPreview: string | null;
+  ordersDisplay: string | null;
+}): number | null {
+  const ex = row.extrasFull?.trim() || row.extrasPreview?.trim();
+  const fromCw = parseRecruitmentAchievementFromExtras(ex);
+  if (fromCw !== null) return fromCw;
+  const platStr = [...row.platforms].join(" ").toLowerCase();
+  if (platStr.includes("lancer")) {
+    const o = parseLancersOrderDisplayAsCount(row.ordersDisplay);
+    if (o !== null) return o;
+  }
+  return null;
+}
+
+/** 欠損は数値ありより常に後ろ。数値同士は ``dir`` に従う。 */
+export function compareRecruitmentAchievementSort(
+  a: number | null,
+  b: number | null,
+  dir: "asc" | "desc",
+): number {
+  const am = a == null;
+  const bm = b == null;
+  if (am && bm) return 0;
+  if (am) return 1;
+  if (bm) return -1;
+  const d = a! - b!;
+  return dir === "desc" ? -d : d;
 }
 
 export function absoluteProfileUrl(platforms: string[], profilePath: string | null): string | null {
@@ -189,9 +246,14 @@ export function aggregateClientAnalysis(rows: DetectedJobClientInput[]): {
 
   const clientsWithProfileUrl = [...map.values()].filter((c) => c.kind === "profile").length;
 
-  const clients: ClientAnalysisRow[] = [...map.values()]
-    .sort((a, b) => b.jobCount - a.jobCount || b.lastDetectedAt.getTime() - a.lastDetectedAt.getTime())
-    .map((c) => ({
+  const clients: ClientAnalysisRow[] = [...map.values()].map((c) => {
+    const recruitmentAchievement = aggregatedRecruitmentAchievement({
+      platforms: c.platforms,
+      extrasFull: c.extrasFull,
+      extrasPreview: c.extrasPreview,
+      ordersDisplay: c.ordersDisplay,
+    });
+    return {
       key: c.key,
       kind: c.kind,
       profilePath: c.profilePath,
@@ -206,7 +268,17 @@ export function aggregateClientAnalysis(rows: DetectedJobClientInput[]): {
       extrasPreview: c.extrasPreview,
       extrasFull: c.extrasFull,
       avatarUrl: c.avatarUrl,
-    }));
+      recruitmentAchievement,
+    };
+  });
+
+  clients.sort((a, b) => {
+    let cmp = compareRecruitmentAchievementSort(a.recruitmentAchievement, b.recruitmentAchievement, "desc");
+    if (cmp !== 0) return cmp;
+    cmp = b.jobCount - a.jobCount;
+    if (cmp !== 0) return cmp;
+    return Date.parse(b.lastDetectedAt) - Date.parse(a.lastDetectedAt);
+  });
 
   return {
     summary: {
