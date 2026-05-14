@@ -67,16 +67,63 @@ function getRawRecord(raw: unknown): Record<string, unknown> | null {
   return raw as Record<string, unknown>;
 }
 
+/**
+ * Monitor ``job_public_dict`` uses snake_case. Merge camelCase aliases so ingested/transformed JSON still renders.
+ */
+function bridgedMonitorRaw(raw: unknown): Record<string, unknown> | null {
+  const r = getRawRecord(raw);
+  if (!r) return null;
+
+  const detailRaw = r.detail_url ?? r.detailUrl;
+  const detail_url =
+    typeof detailRaw === "string" && detailRaw.trim() ? detailRaw.trim() : undefined;
+
+  const nameRaw = r.client_name ?? r.clientName;
+  const client_name =
+    typeof nameRaw === "string" && nameRaw.trim() ? nameRaw.trim() : undefined;
+
+  const ordersRaw = r.client_orders ?? r.clientOrders;
+  const client_orders =
+    ordersRaw != null && String(ordersRaw).trim() ? String(ordersRaw).trim() : undefined;
+
+  const ratingRaw = r.client_rating ?? r.clientRating;
+  let client_rating: number | undefined;
+  if (typeof ratingRaw === "number" && !Number.isNaN(ratingRaw)) client_rating = ratingRaw;
+
+  const extrasRaw = r.client_extras ?? r.clientExtras;
+  const client_extras =
+    typeof extrasRaw === "string" && extrasRaw.trim() ? extrasRaw.trim().replace(/\s+/g, " ") : undefined;
+
+  const profileRaw = r.client_profile_url ?? r.clientProfileUrl;
+  const client_profile_url =
+    typeof profileRaw === "string" && profileRaw.trim() ? profileRaw.trim() : undefined;
+
+  const avatarRaw = r.client_avatar_url ?? r.clientAvatarUrl;
+  const client_avatar_url =
+    typeof avatarRaw === "string" && avatarRaw.trim() ? avatarRaw.trim() : undefined;
+
+  return {
+    ...r,
+    ...(detail_url !== undefined ? { detail_url } : {}),
+    ...(client_name !== undefined ? { client_name } : {}),
+    ...(client_orders !== undefined ? { client_orders } : {}),
+    ...(client_rating !== undefined ? { client_rating } : {}),
+    ...(client_extras !== undefined ? { client_extras } : {}),
+    ...(client_profile_url !== undefined ? { client_profile_url } : {}),
+    ...(client_avatar_url !== undefined ? { client_avatar_url } : {}),
+  };
+}
+
 /** Monitor ingest ``raw.detail_url`` is CrowdWorks when it points at crowdworks.jp. */
 function isCrowdWorksJobRaw(raw: unknown): boolean {
-  const r = getRawRecord(raw);
+  const r = bridgedMonitorRaw(raw);
   const du = r?.detail_url;
   return typeof du === "string" && du.toLowerCase().includes("crowdworks.jp");
 }
 
 /** Monitor `job_public_dict` uses snake_case (client_name, …). */
 function clientNameFromRaw(raw: unknown): string | null {
-  const r = getRawRecord(raw);
+  const r = bridgedMonitorRaw(raw);
   if (!r) return null;
   const n = r.client_name;
   if (typeof n === "string" && n.trim()) return n.trim();
@@ -134,7 +181,7 @@ function isRedundantLancersExtras(extras: string, ordersText: string | null, rat
 }
 
 function parseClientListingMeta(raw: unknown): ClientListingMeta | null {
-  const r = getRawRecord(raw);
+  const r = bridgedMonitorRaw(raw);
   if (!r) return null;
 
   let ordersText: string | null = null;
@@ -147,7 +194,8 @@ function parseClientListingMeta(raw: unknown): ClientListingMeta | null {
     rating = r.client_rating;
   }
 
-  const exRaw = typeof r.client_extras === "string" ? r.client_extras.trim().replace(/\s+/g, " ") : "";
+  const exRaw =
+    typeof r.client_extras === "string" ? r.client_extras.trim().replace(/\s+/g, " ") : "";
   if (!ordersText && exRaw) {
     const fromEx = extractOrdersFromExtras(exRaw);
     if (fromEx) ordersText = fromEx;
@@ -240,9 +288,9 @@ function ClientMetaStrip({ raw }: { raw: unknown }) {
 }
 
 function resolveClientProfileUrl(job: JobRow): string | null {
-  const raw = job.rawData;
-  if (!raw || typeof raw !== "object") return null;
-  const u = (raw as Record<string, unknown>).client_profile_url;
+  const r = bridgedMonitorRaw(job.rawData);
+  if (!r) return null;
+  const u = r.client_profile_url;
   if (typeof u !== "string" || !u.trim()) return null;
   const s = u.trim();
   if (s.startsWith("http://") || s.startsWith("https://")) return s;

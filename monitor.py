@@ -608,6 +608,18 @@ def parse_client(card: BeautifulSoup) -> tuple[str, str | None, str, str | None,
             except ValueError:
                 rating = None
 
+    img_latest = card.select_one("div.p-search-job__latest-media-thumbnail img.c-avatar__image")
+    if img_latest:
+        avatar_src = img_latest.get("src")
+        avatar_url = absolutize_lancers_asset(avatar_src)
+
+    if not href:
+        alt = card.select_one('a[href^="/client/"]')
+        if alt:
+            href = alt.get("href")
+            if not name:
+                name = alt.get_text(strip=True)
+
     return name, href, " / ".join(extras) if extras else "", avatar_url, orders, rating
 
 
