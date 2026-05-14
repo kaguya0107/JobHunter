@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import { PostingSourceBadges } from "@/components/posting-source-badges";
 
 type HistoryRow = {
   id: string;
@@ -30,6 +31,7 @@ type HistoryRow = {
   retryCount: number;
   workerHost: string | null;
   platform: string;
+  listingUrl: string;
   listingUrlSlice: string;
   durationMs: number | null;
 };
@@ -93,8 +95,8 @@ export default function HistoryPage() {
               <Card className="border-zinc-200 bg-white/90 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/80">
                 <CardContent className="space-y-4 p-5">
                   <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="space-y-1">
-                      <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">{row.platform}</p>
+                    <div className="space-y-2">
+                      <PostingSourceBadges platform={row.platform} listingUrl={row.listingUrl} orientation="row" />
                       <p className="font-mono text-xs text-zinc-500">{row.listingUrlSlice}</p>
                     </div>
                     <Badge variant={row.success ? "secondary" : "outline"}>

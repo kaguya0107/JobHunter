@@ -28,7 +28,7 @@ export async function GET(req: Request) {
         title: true,
         detectedAt: true,
         projectUrl: true,
-        source: { select: { platform: true } },
+        source: { select: { platform: true, scrapingType: true } },
       },
     }),
     db.detectedJob.count({ where }),
@@ -41,6 +41,7 @@ export async function GET(req: Request) {
       detectedAt: j.detectedAt.toISOString(),
       projectUrl: j.projectUrl,
       platform: j.source.platform,
+      scrapingType: j.source.scrapingType,
     })),
     totalUnread,
   });

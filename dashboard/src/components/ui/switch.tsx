@@ -11,13 +11,29 @@ export const Switch = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <SwitchPrimitives.Root
     className={cn(
-      "peer inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent bg-zinc-200 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-zinc-900 dark:bg-zinc-800 dark:data-[state=checked]:bg-zinc-100",
+      "peer inline-flex h-[22px] w-[42px] shrink-0 cursor-pointer items-center rounded-full border border-transparent shadow-inner transition-colors",
+      "outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/80 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-zinc-950",
+      "disabled:cursor-not-allowed disabled:opacity-45",
+      /* OFF — dim track, reads clearly “inactive” in light + dark */
+      "data-[state=unchecked]:bg-zinc-300 data-[state=unchecked]:shadow-[inset_0_1px_2px_rgba(0,0,0,0.12)]",
+      "dark:data-[state=unchecked]:bg-zinc-700 dark:data-[state=unchecked]:shadow-[inset_0_1px_3px_rgba(0,0,0,0.35)]",
+      /* ON — high-contrast green, unmistakable from OFF */
+      "data-[state=checked]:border-emerald-700/40 data-[state=checked]:bg-emerald-600 data-[state=checked]:shadow-[inset_0_1px_2px_rgba(0,0,0,0.15)]",
+      "dark:data-[state=checked]:border-emerald-400/30 dark:data-[state=checked]:bg-emerald-500",
       className,
     )}
     {...props}
     ref={ref}
   >
-    <SwitchPrimitives.Thumb className="pointer-events-none block size-4 translate-x-0.5 rounded-full bg-white shadow transition-transform data-[state=checked]:translate-x-4" />
+    <SwitchPrimitives.Thumb
+      className={cn(
+        "pointer-events-none block size-[18px] rounded-full bg-white shadow-md ring-1 ring-black/10 transition-transform will-change-transform",
+        "data-[state=unchecked]:translate-x-[3px]",
+        "data-[state=checked]:translate-x-[21px]",
+        /* Thumb ring contrasts on green vs gray track */
+        "data-[state=checked]:ring-white/40 dark:data-[state=checked]:ring-white/20",
+      )}
+    />
   </SwitchPrimitives.Root>
 ));
 Switch.displayName = SwitchPrimitives.Root.displayName;

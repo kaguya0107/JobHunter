@@ -127,6 +127,11 @@ async function seedDemoFull() {
       ai: 82,
       tags: ["ruby", "api", "long-term"],
       notif: true,
+      clientProfileUrl: "/client/demo_client_rails",
+      clientOrders: "24",
+      clientRating: 4.8,
+      clientExtrasSummary:
+        "デモ保存フィールドの例: 発注率 92%（23/25） · フィードバック 良23・悪1 · 継続ランサー 4人",
     },
     {
       sid: sCw230.id,
@@ -138,6 +143,10 @@ async function seedDemoFull() {
       ai: 68,
       tags: ["wordpress", "lp"],
       notif: true,
+      clientProfileUrl: "/public/employers/900001",
+      clientOrders: "31",
+      clientRating: 4.6,
+      clientExtrasSummary: "デモ: 募集実績 40 · 完了 120 · 契約 95 · 完了率 88%",
     },
     {
       sid: sCw226.id,
@@ -149,6 +158,10 @@ async function seedDemoFull() {
       ai: 91,
       tags: ["bigquery", "etl"],
       notif: false,
+      clientProfileUrl: "/public/employers/900002",
+      clientOrders: "18",
+      clientRating: 4.9,
+      clientExtrasSummary: "デモ: 募集実績 22 · 完了 55 · 契約 48 · 完了率 92%",
     },
   ];
 
@@ -166,6 +179,10 @@ async function seedDemoFull() {
         aiScore: j.ai,
         tags: j.tags,
         notificationSent: j.notif,
+        clientProfileUrl: j.clientProfileUrl,
+        clientOrders: j.clientOrders,
+        clientRating: j.clientRating,
+        clientExtrasSummary: j.clientExtrasSummary,
         rawData: { seeded: true, demo: true },
       },
     });

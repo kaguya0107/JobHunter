@@ -3,6 +3,7 @@ import { DiscordDeliveryStatus, Prisma } from "@prisma/client";
 import { err, ok } from "@/lib/api-response";
 import { db } from "@/lib/db";
 import { ingestPollSchema } from "@/lib/schemas/ingest";
+import { clientSnapshotFromMonitorRaw } from "@/lib/monitor-ingest-client";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -88,6 +89,7 @@ export async function POST(req: Request) {
 
         const tags = [j.categoryLabel].filter(Boolean);
         const raw = (j.raw ?? {}) as Prisma.InputJsonValue;
+        const snap = clientSnapshotFromMonitorRaw(j.raw ?? {});
 
         const jobRow = await tx.detectedJob.upsert({
           where: { projectUrl: j.detailUrl },
@@ -97,6 +99,11 @@ export async function POST(req: Request) {
             description: j.listingSummary ?? "",
             budget: j.budget,
             clientName: j.clientName,
+            clientProfileUrl: snap.clientProfileUrl,
+            clientOrders: snap.clientOrders,
+            clientRating: snap.clientRating,
+            clientExtrasSummary: snap.clientExtrasSummary,
+            clientAvatarUrl: snap.clientAvatarUrl,
             projectUrl: j.detailUrl,
             postedAt: null,
             detectedAt: finished,
@@ -115,6 +122,11 @@ export async function POST(req: Request) {
             tags,
             notificationSent: j.discordDelivered && Boolean(j.webhookUrl),
             rawData: raw,
+            clientProfileUrl: snap.clientProfileUrl,
+            clientOrders: snap.clientOrders,
+            clientRating: snap.clientRating,
+            clientExtrasSummary: snap.clientExtrasSummary,
+            clientAvatarUrl: snap.clientAvatarUrl,
           },
         });
 

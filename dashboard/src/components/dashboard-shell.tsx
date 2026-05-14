@@ -9,6 +9,7 @@ import {
   BotIcon,
   HistoryIcon,
   CommandIcon,
+  UsersRoundIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -26,6 +27,7 @@ const nav = [
   { href: "/", label: "Overview", icon: LineChartIcon },
   { href: "/sources", label: "Sources", icon: LayersIcon },
   { href: "/jobs", label: "Jobs", icon: SearchIcon },
+  { href: "/clients", label: "Client analysis", icon: UsersRoundIcon },
   { href: "/history", label: "History", icon: HistoryIcon },
   { href: "/ai", label: "AI Analysis", icon: BotIcon },
   { href: "/discord", label: "Discord", icon: BellIcon },
@@ -55,7 +57,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
 
           <nav className="mt-10 flex flex-1 flex-col gap-px">
             {nav.map(({ href, label, icon: Icon }) => {
-              const active = path === href;
+              const active = href === "/" ? path === "/" : path === href || path.startsWith(`${href}/`);
               return (
                 <Link
                   key={href}

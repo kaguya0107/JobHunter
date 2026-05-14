@@ -46,6 +46,13 @@ model DetectedJob {
   description        String           @default("")
   budget             String           @default("")
   clientName         String           @default("") @map("client_name")
+  /// Monitor ``client_profile_url`` (e.g. ``/client/slug`` or CrowdWorks employer path).
+  clientProfileUrl   String?          @map("client_profile_url")
+  clientOrders       String?          @map("client_orders")
+  clientRating       Float?           @map("client_rating")
+  /// Full ``client_extras`` line from listing/profile enrichment (発注率・フィードバック等).
+  clientExtrasSummary String?         @map("client_extras_summary") @db.Text
+  clientAvatarUrl    String?          @map("client_avatar_url")
   projectUrl         String           @map("project_url")
   postedAt           DateTime?        @map("posted_at")
   detectedAt         DateTime         @default(now()) @map("detected_at")
