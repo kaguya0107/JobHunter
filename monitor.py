@@ -20,6 +20,9 @@ Configure with environment variables:
   CROWDWORKS_FETCH_EMPLOYER_PROFILE     If falsy only: skip GET ``/public/employers/{id}`` enrichment (default on). Listing JSON exposes sparse ``client``; stars and「募集実績・完了・契約・完了率」derive from employer profile payloads.
   CROWDWORKS_PROFILE_CACHE_SECONDS     Seconds to memoize parsed employer payloads per user id (default ``3600``). Set ``0`` to disable caching.
 
+  LANCERS_FETCH_CLIENT_PROFILE        If falsy only: skip GET ``/client/{nickname}`` enrichment (default on). Search cards omit 発注/評価 for many rows;プロフィール先のヘッダ表から発注数・発注率・フィードバック内訳・継続ランサーを補う。
+  LANCERS_CLIENT_PROFILE_CACHE_SECONDS  Memoize parsed client payloads per `/client/` path (default ``3600``). Set ``0`` to disable caching.
+
   DASHBOARD_INGEST            If "1"/"true"/"yes", POST poll results to the Job Hunter dashboard API.
   DASHBOARD_INGEST_URL        Base URL of the dashboard **Next.js origin only** — no trailing path (e.g. ``http://127.0.0.1:3000`` or ``https://your-app.vercel.app``). POST target is ``{base}/api/internal/ingest``. If Next uses ``basePath`` (subpath deployment), include that path in this URL (e.g. ``https://host/jobhunter``). Requires ``DASHBOARD_INGEST_SECRET``.
   DASHBOARD_INGEST_SECRET     Shared secret — must match ``DASHBOARD_INGEST_SECRET`` in dashboard ``.env``.
@@ -120,6 +123,7 @@ DEFAULT_UA = (
 )
 
 WORK_ID_RE = re.compile(r"/work/detail/(\d+)")
+LANCERS_CLIENT_PROFILE_PATH_RE = re.compile(r"(?:/+|^)/client/([^/?#]+)/?", re.IGNORECASE)
 REQUEST_DETAIL_TERM_MARKERS = ("依頼概要", "募集内容", "仕事の内容", "依頼内容", "仕事詳細")
 DISCORD_WEBHOOK_EXECUTE_PATH = re.compile(r"^/api(?:/v\d+)?/webhooks/(\d+)/([^/]+)$")
 DISCORD_WEBHOOK_HOSTS = frozenset(
@@ -872,6 +876,8 @@ def _lancers_metrics_regex_fallback(card: Tag) -> tuple[str | None, float | None
 CW_EMPLOYER_URL_ID_RE = re.compile(r"(?:/+|^)(?:public/)?employers/(\d+)(?:[^\d]|$)", re.IGNORECASE)
 _CROWDWORKS_EMPLOYER_STATS_CACHE_V1: dict[int, tuple[float, dict[str, Any]]] = {}
 
+_LANCERS_CLIENT_STATS_CACHE_V1: dict[str, tuple[float, dict[str, Any] | None]] = {}
+
 
 def crowdworks_extract_employer_user_id(profile_href: str | None) -> int | None:
     """Parse employer user id from a relative `/public/employers/{id}` or absolute CrowdWorks URL."""
@@ -1132,6 +1138,315 @@ def enrich_crowdworks_jobs_with_employer_profiles(session: requests.Session, job
                 job.client_extras = f"{ex} · {line}" if ex else line
 
 
+def job_detail_url_is_lancers(detail_url: str) -> bool:
+    host = (urlparse(detail_url).hostname or "").lower()
+    return host.endswith("lancers.jp")
+
+
+def lancers_client_profile_canonical_path(client_profile_url: str | None) -> str | None:
+    """Return ``/client/slug`` for Lancers client profile links; ``None`` for unrelated URLs."""
+    if not client_profile_url or not isinstance(client_profile_url, str):
+        return None
+    s = client_profile_url.strip()
+    if s.startswith("//"):
+        path = urlparse(f"https:{s}").path or ""
+    elif s.startswith("http://") or s.startswith("https://"):
+        path = urlparse(s).path or ""
+    else:
+        path = s if s.startswith("/") else f"/{s}"
+    mo = LANCERS_CLIENT_PROFILE_PATH_RE.search(path.replace("\\", "/"))
+    return f"/client/{mo.group(1)}" if mo else None
+
+
+def _lancers_client_profile_cache_ttl_s() -> float:
+    raw = os.environ.get("LANCERS_CLIENT_PROFILE_CACHE_SECONDS", "3600").strip()
+    try:
+        n = float(raw)
+        return max(60.0, n) if n > 0 else 0.0
+    except ValueError:
+        return 3600.0
+
+
+def _lancers_strip_num_token(raw: str) -> str | None:
+    """First integer-like token from a header summary cell (`19`, `1,866`)."""
+    t = " ".join(raw.replace(",", "").split())
+    mo = re.search(r"\d+", t)
+    return mo.group(0) if mo else None
+
+
+def _lancers_int_from_vis(val: Any) -> int | None:
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, str):
+        t = val.strip().replace(",", "")
+        try:
+            n = int(t)
+            return n if n >= 0 else None
+        except ValueError:
+            return None
+    if isinstance(val, (int, float)):
+        if not math.isfinite(float(val)):
+            return None
+        n = int(val)
+        return n if n >= 0 else None
+    return None
+
+
+def parse_lancers_client_profile_stats(page_html: str) -> dict[str, Any] | None:
+    """
+    Parsed header summary table from ``/client/{nickname}``: 発注数, 評価(良・悪件数),
+    発注率 breakdown, optional 業種 dl — mirrors what the JP profile shows above the carousel.
+    """
+    soup = BeautifulSoup(page_html, "html.parser")
+    h1 = soup.select_one(".p-profile-header h1") or soup.select_one(".p-profile-media__heading")
+    display_name = " ".join(h1.get_text(separator=" ", strip=True).split()) if h1 else ""
+
+    tbl = soup.select_one(".p-profile-header-summary.c-table-summary")
+    if not tbl:
+        base: dict[str, Any] = {"display_name": display_name.strip() or None}
+        avatar_img = soup.select_one(".p-profile-header img.c-avatar__image")
+        if avatar_img:
+            base["avatar_src"] = avatar_img.get("src")
+        dl = soup.select_one("dl.c-definition-list")
+        if dl:
+            dt = dl.select_one("dt")
+            dd = dl.select_one("dd")
+            if dt and dd:
+                dt_txt = dt.get_text(" ", strip=True)
+                if "業種" in dt_txt and ("発注" in dt_txt or "希望" in dt_txt):
+                    ind = " ".join(dd.get_text(separator=" ", strip=True).split())
+                    base["preferred_industry"] = ind or None
+        if base.get("display_name") or base.get("avatar_src") or base.get("preferred_industry"):
+            return base
+        return None
+
+    oc: int | None = None
+    rate_pct: int | None = None
+    rate_num: int | None = None
+    rate_den: int | None = None
+    fb_good: int | None = None
+    fb_bad: int | None = None
+    continue_cnt: int | None = None
+
+    cols = tbl.select(":scope > .c-table-summary__col")
+    for col in cols:
+        head = col.select_one(".c-table-summary__col-head")
+        if not head:
+            continue
+        label_raw = head.get_text(" ", strip=True)
+        label = " ".join(label_raw.split())
+        if "発注数" in label and "発注率" not in label:
+            num_el = col.select_one(".p-profile-header-summary__description-text span")
+            if num_el:
+                oc = _lancers_int_from_vis(num_el.get_text(strip=True))
+            else:
+                ntxt = col.select_one(".p-profile-header-summary__description-text")
+                if ntxt:
+                    tk = _lancers_strip_num_token(ntxt.get_text(" ", strip=True))
+                    oc = _lancers_int_from_vis(tk) if tk else None
+
+        elif "評価" in label and "発注" not in label:
+            nums: list[int] = []
+            for item in col.select(".p-profile-header-summary__description-item .p-profile-header-summary__description-text"):
+                for sp in item.select("span"):
+                    if "u-unit" in (sp.get("class") or []):
+                        continue
+                    n = _lancers_int_from_vis(sp.get_text(strip=True))
+                    if n is not None:
+                        nums.append(n)
+            if len(nums) >= 1:
+                fb_good = nums[0]
+            if len(nums) >= 2:
+                fb_bad = nums[1]
+
+        elif "発注率" in label:
+            pct_el = col.select_one(".p-profile-header-summary__description-text span")
+            if pct_el:
+                pct_txt = pct_el.get_text(strip=True).replace(",", "")
+                if pct_txt.strip() != "---":
+                    rate_pct = _lancers_int_from_vis(pct_txt)
+            note = col.select_one(".c-table-summary__col-note")
+            if note:
+                note_t = note.get_text(" ", strip=True)
+                mo_br = re.search(r"(\d+)\s*[/／]\s*([\d,\s]+)", note_t)
+                if mo_br:
+                    rate_num = _lancers_int_from_vis(mo_br.group(1))
+                    rate_den = _lancers_int_from_vis(mo_br.group(2).replace(",", "").replace(" ", ""))
+
+        elif "継続ランサー" in label:
+            num_el = col.select_one(".p-profile-header-summary__description-text span")
+            if num_el:
+                tx = num_el.get_text(strip=True).replace(",", "")
+                if tx != "---":
+                    continue_cnt = _lancers_int_from_vis(tx)
+
+    out: dict[str, Any] = {
+        "display_name": display_name.strip() or None,
+        "order_count": oc,
+        "order_rate_pct": rate_pct,
+        "order_rate_num": rate_num,
+        "order_rate_den": rate_den,
+        "feedback_good": fb_good,
+        "feedback_bad": fb_bad,
+        "continuing_lancers": continue_cnt,
+    }
+    avatar_img = soup.select_one(".p-profile-header img.c-avatar__image")
+    if avatar_img:
+        out["avatar_src"] = avatar_img.get("src")
+    dl = soup.select_one("dl.c-definition-list")
+    if dl:
+        dt = dl.select_one("dt")
+        dd = dl.select_one("dd")
+        if dt and dd:
+            dt_txt = dt.get_text(" ", strip=True)
+            if "業種" in dt_txt and ("発注" in dt_txt or "希望" in dt_txt):
+                ind = " ".join(dd.get_text(separator=" ", strip=True).split())
+                out["preferred_industry"] = ind or None
+
+    has_metric = any(
+        out.get(k) is not None
+        for k in (
+            "order_count",
+            "order_rate_pct",
+            "order_rate_num",
+            "order_rate_den",
+            "feedback_good",
+            "feedback_bad",
+            "continuing_lancers",
+        )
+    )
+    name_ok = bool((out.get("display_name") or "").strip())
+    if name_ok or has_metric or bool(out.get("avatar_src")) or bool(out.get("preferred_industry")):
+        return out
+    return None
+
+
+def _lancers_get_cached_client_profile(path_key: str, now_u: float) -> dict[str, Any] | None:
+    tup = _LANCERS_CLIENT_STATS_CACHE_V1.get(path_key)
+    if not tup:
+        return None
+    ttl = _lancers_client_profile_cache_ttl_s()
+    if ttl <= 0:
+        _LANCERS_CLIENT_STATS_CACHE_V1.pop(path_key, None)
+        return None
+    ts, cached = tup
+    if (now_u - ts) > ttl:
+        return None
+    return cached
+
+
+def _lancers_set_cached_client_profile(path_key: str, now_u: float, stats: dict[str, Any] | None) -> None:
+    if stats is not None:
+        _LANCERS_CLIENT_STATS_CACHE_V1[path_key] = (now_u, stats)
+
+
+def fetch_lancers_client_profile_stats_cached(session: requests.Session, path_key: str, timeout: float) -> dict[str, Any] | None:
+    """path_key canonical ``/client/slug`` (case preserved)."""
+    now_u = time.time()
+    cached = _lancers_get_cached_client_profile(path_key, now_u)
+    if cached is not None:
+        return cached
+    url = urljoin("https://www.lancers.jp/", path_key.lstrip("/"))
+    try:
+        page = fetch_html(session, url, timeout)
+    except requests.RequestException:
+        LOG.debug("Lancers: client profile fetch failed for %s", path_key, exc_info=True)
+        return None
+    stats = parse_lancers_client_profile_stats(page)
+    if stats:
+        _lancers_set_cached_client_profile(path_key, now_u, stats)
+    return stats
+
+
+def _append_lancers_client_extras(job: JobListing, parts: list[str]) -> None:
+    if not parts:
+        return
+    line = " · ".join(p for p in parts if p)
+    if not line:
+        return
+    ex = job.client_extras.strip()
+    if not ex:
+        job.client_extras = line
+    elif line not in ex:
+        job.client_extras = f"{ex} · {line}" if ex else line
+
+
+def enrich_lancers_jobs_with_client_profiles(session: requests.Session, jobs: list[JobListing], timeout: float) -> None:
+    """
+    Hydrate sparse listing cards via ``/client/{nickname}`` profile header metrics.
+
+    Default on (``LANCERS_FETCH_CLIENT_PROFILE``). One GET per distinct client path within the TTL cache.
+    """
+    if not env_bool("LANCERS_FETCH_CLIENT_PROFILE", True):
+        return
+    if not jobs:
+        return
+    paths: dict[str, None] = {}
+    for job in jobs:
+        if not job.detail_url.strip() or not job_detail_url_is_lancers(job.detail_url):
+            continue
+        pth = lancers_client_profile_canonical_path(job.client_profile_url)
+        if not pth:
+            continue
+        paths[pth] = None
+
+    fetched: dict[str, dict[str, Any] | None] = {}
+    for pkey in paths:
+        st = fetch_lancers_client_profile_stats_cached(session, pkey, timeout)
+        fetched[pkey] = st if isinstance(st, dict) else None
+
+    for job in jobs:
+        if not job.detail_url.strip() or not job_detail_url_is_lancers(job.detail_url):
+            continue
+        pkey = lancers_client_profile_canonical_path(job.client_profile_url)
+        if not pkey:
+            continue
+        stats = fetched.get(pkey)
+        if not stats:
+            continue
+
+        dn = stats.get("display_name")
+        if isinstance(dn, str) and dn.strip():
+            job.client_name = dn.strip()
+
+        oc = stats.get("order_count")
+        if isinstance(oc, int):
+            job.client_orders = str(oc)
+
+        av = stats.get("avatar_src")
+        avu = absolutize_lancers_asset(av) if isinstance(av, str) and av.strip() else None
+        if avu and not (job.client_avatar_url or "").strip():
+            job.client_avatar_url = avu
+
+        extras_parts: list[str] = []
+
+        pct = stats.get("order_rate_pct")
+        on = stats.get("order_rate_num")
+        od = stats.get("order_rate_den")
+        if isinstance(pct, int) and 0 <= pct <= 100:
+            if isinstance(on, int) and isinstance(od, int) and od > 0:
+                extras_parts.append(f"発注率 {pct}%（{on}/{od}）")
+            else:
+                extras_parts.append(f"発注率 {pct}%")
+
+        gf = stats.get("feedback_good")
+        bf = stats.get("feedback_bad")
+        if isinstance(gf, int) and isinstance(bf, int):
+            extras_parts.append(f"フィードバック 良{gf}・悪{bf}")
+        elif isinstance(gf, int):
+            extras_parts.append(f"フィードバック（良）{gf}件")
+
+        clancers = stats.get("continuing_lancers")
+        if isinstance(clancers, int) and clancers > 0:
+            extras_parts.append(f"継続ランサー {clancers}人")
+
+        ind = stats.get("preferred_industry")
+        if isinstance(ind, str) and ind.strip():
+            extras_parts.append(f"発注したい業種: {ind.strip()}")
+
+        _append_lancers_client_extras(job, extras_parts)
+
+
 def parse_crowdworks_listings(page_html: str, listing_url: str) -> list[JobListing]:
     """Parse embedded ``#vue-container`` JSON from CrowdWorks search (first result page)."""
     soup = BeautifulSoup(page_html, "html.parser")
@@ -1289,6 +1604,7 @@ def fetch_live_listings_snapshot(session: requests.Session, urls: list[str], tim
             keyed.add(k)
             merged.append(job)
     enrich_crowdworks_jobs_with_employer_profiles(session, merged, timeout)
+    enrich_lancers_jobs_with_client_profiles(session, merged, timeout)
     return merged
 
 
@@ -1515,7 +1831,7 @@ def job_to_discord_embed(job: JobListing) -> dict:
         desc_lines.append(f"⭐ **{rating_heading}:** —")
 
     ex = job.client_extras.strip()
-    if is_cw and ex:
+    if ex:
         desc_lines.append("")
         desc_lines.append(f"📊 {ex}")
 
@@ -1873,6 +2189,7 @@ def run_poll(
                 all_from_round[job.work_id] = job
 
     enrich_crowdworks_jobs_with_employer_profiles(session, list(all_from_round.values()), timeout)
+    enrich_lancers_jobs_with_client_profiles(session, list(all_from_round.values()), timeout)
 
     new_entries = []
     buckets = monitor_category_buckets(urls)

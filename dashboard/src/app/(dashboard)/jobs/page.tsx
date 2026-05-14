@@ -118,8 +118,9 @@ function extrasLineAfterChips(extras: string, ordersText: string | null, rating:
       .trim();
   }
   t = t.replace(/^[/｜|]\s*/, "").replace(/\s*[/｜|]\s*$/g, "").trim();
+  const maxExtras = 200;
   if (t.length < 2) return null;
-  return t.length > 56 ? `${t.slice(0, 53)}…` : t;
+  return t.length > maxExtras ? `${t.slice(0, maxExtras - 1)}…` : t;
 }
 
 function isRedundantLancersExtras(extras: string, ordersText: string | null, rating: number | null): boolean {
@@ -685,32 +686,38 @@ export default function JobsPage() {
               value={boardPf === "" ? "__pf_all__" : boardPf}
               onValueChange={(v) => setBoardPf(v === "__pf_all__" ? "" : (v as "lw" | "cw"))}
             >
-              <SelectTrigger className="w-[182px]" aria-label="プラットフォームで絞り込み">
-                <SelectValue placeholder="プラットフォーム" />
+              <SelectTrigger
+                className="h-9 w-auto min-w-[5.75rem] max-w-none shrink-0 gap-2 overflow-hidden"
+                aria-label="プラットフォーム: すべて／LW／CW"
+              >
+                <SelectValue placeholder="すべて" className="min-w-0 flex-1 truncate text-left" />
               </SelectTrigger>
               <SelectContent position="popper" sideOffset={4}>
-                <SelectItem value="__pf_all__">プラットフォーム（すべて）</SelectItem>
-                <SelectItem value="lw">LW（ランサーズ）</SelectItem>
-                <SelectItem value="cw">CW（クラウドワークス）</SelectItem>
+                <SelectItem value="__pf_all__">すべて</SelectItem>
+                <SelectItem value="lw">LW</SelectItem>
+                <SelectItem value="cw">CW</SelectItem>
               </SelectContent>
             </Select>
             <Select
               value={boardCat === "" ? "__cat_all__" : boardCat}
               onValueChange={(v) => setBoardCat(v === "__cat_all__" ? "" : (v as "system" | "web"))}
             >
-              <SelectTrigger className="w-[158px]" aria-label="求人カテゴリで絞り込み">
-                <SelectValue placeholder="カテゴリ" />
+              <SelectTrigger
+                className="h-9 w-auto min-w-[6.75rem] max-w-none shrink-0 gap-2 overflow-hidden sm:min-w-[7rem]"
+                aria-label="求人カテゴリ: すべて／システム／Web（掲載元URLに基づく）"
+              >
+                <SelectValue placeholder="すべて" className="min-w-0 flex-1 truncate text-left" />
               </SelectTrigger>
               <SelectContent position="popper" sideOffset={4}>
-                <SelectItem value="__cat_all__">カテゴリ（すべて）</SelectItem>
+                <SelectItem value="__cat_all__">すべて</SelectItem>
                 <SelectItem value="system">システム</SelectItem>
                 <SelectItem value="web">Web</SelectItem>
               </SelectContent>
             </Select>
             <Select value={sort || "__default"} onValueChange={(v) => setSort(v === "__default" ? "" : (v as typeof sort))}>
-              <SelectTrigger className="sm:w-[200px]">
-                <ArrowUpDownIcon className="mr-2 size-4 shrink-0" />
-                <SelectValue placeholder="Sort" />
+              <SelectTrigger className="flex h-9 w-auto min-w-[10.5rem] max-w-none shrink-0 gap-2 overflow-hidden sm:min-w-[11.5rem]">
+                <ArrowUpDownIcon className="size-4 shrink-0 opacity-70" aria-hidden />
+                <SelectValue placeholder="Sort" className="min-w-0 flex-1 truncate text-left" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__default">Newest detected</SelectItem>
