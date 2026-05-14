@@ -3,7 +3,6 @@
 import type { ReactNode } from "react";
 
 import { abbreviatePostingPlatform, postingBoardCategory } from "@/lib/posting-board-meta";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 function platformToneClass(platformKey: string): string {
@@ -47,7 +46,6 @@ export function PostingSourceBadges(props: {
   const { platform, listingUrl, orientation = "col", className, dense } = props;
   const pf = abbreviatePostingPlatform(platform);
   const cat = postingBoardCategory(platform, listingUrl ?? null);
-  const tooltip = cat.detailLines.join("\n");
 
   const textSz = dense ? "text-[11px]" : "text-xs";
   const abbrSz = dense ? "text-[11px]" : "text-sm";
@@ -60,31 +58,20 @@ export function PostingSourceBadges(props: {
         className,
       )}
     >
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            className={cn(
-              "inline-flex cursor-help rounded-lg border-0 bg-transparent p-0 text-left outline-none hover:opacity-[0.93]",
-              "focus-visible:ring-2 focus-visible:ring-sky-500/60 focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-            )}
-            aria-label={`プラットフォーム ${pf.abbr}、求人ボード一覧カテゴリ ${cat.short}`}
-          >
-            <SourcePill className={platformToneClass(pf.tonesKey)} title={listingUrl ?? undefined}>
-              <span className={cn("flex flex-wrap items-baseline gap-1 tracking-tight", textSz)}>
-                <span className={cn("font-bold tabular-nums tracking-tighter", abbrSz)}>{pf.abbr}</span>
-                <span className="select-none opacity-50" aria-hidden>
-                  ·
-                </span>
-                <span className={cn("min-w-0 max-w-[7.5rem] truncate font-semibold", textSz)}>{cat.short}</span>
-              </span>
-            </SourcePill>
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="top" className="max-w-[min(28rem,calc(100vw-2rem))] whitespace-pre-wrap text-left text-xs leading-relaxed">
-          {tooltip}
-        </TooltipContent>
-      </Tooltip>
+      <span
+        className="inline-flex"
+        aria-label={`プラットフォーム ${pf.abbr}、求人ボード一覧カテゴリ ${cat.short}`}
+      >
+        <SourcePill className={platformToneClass(pf.tonesKey)} title={listingUrl ?? undefined}>
+          <span className={cn("flex flex-wrap items-baseline gap-1 tracking-tight", textSz)}>
+            <span className={cn("font-bold tabular-nums tracking-tighter", abbrSz)}>{pf.abbr}</span>
+            <span className="select-none opacity-50" aria-hidden>
+              ·
+            </span>
+            <span className={cn("min-w-0 max-w-[7.5rem] truncate font-semibold", textSz)}>{cat.short}</span>
+          </span>
+        </SourcePill>
+      </span>
     </div>
   );
 }

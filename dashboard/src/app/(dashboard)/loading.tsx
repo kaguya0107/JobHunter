@@ -1,19 +1,9 @@
-import { Card } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
+import { DashboardPageLoading } from "@/components/page-loading-view";
 
 export default function DashboardLoading() {
   return (
-    <div className="space-y-6">
-      <Skeleton className="h-12 w-[320px]" />
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Skeleton className="h-32" />
-        <Skeleton className="h-32" />
-        <Skeleton className="h-32" />
-        <Skeleton className="h-32" />
-      </div>
-      <Card className="p-4">
-        <Skeleton className="h-[340px]" />
-      </Card>
+    <div className="-mx-4 py-10 md:-mx-8 md:py-14 lg:-mx-10">
+      <DashboardPageLoading />
     </div>
   );
 }

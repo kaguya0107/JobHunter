@@ -17,7 +17,9 @@ import * as React from "react";
 import { useTheme } from "next-themes";
 
 import { CommandMenu } from "@/components/command-menu";
+import { NavigationProgress } from "@/components/navigation-progress";
 import { NotificationBell } from "@/components/notification-bell";
+import { QueryPendingOverlay } from "@/components/query-pending-overlay";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { useUiStore } from "@/stores/ui-store";
@@ -45,6 +47,8 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
 
   return (
     <>
+      <NavigationProgress />
+      <QueryPendingOverlay />
       <CommandMenu />
       <div className="relative flex min-h-screen">
         <aside className="fixed inset-y-0 left-0 z-40 hidden w-56 shrink-0 border-r border-zinc-200 bg-white/95 px-3 pb-8 pt-6 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/95 md:flex md:flex-col">
