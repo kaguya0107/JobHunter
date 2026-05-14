@@ -1,6 +1,29 @@
 import { DiscordDeliveryStatus } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { bucketPlatformForStats, jobBoardCategoryTriple, postingCategoryTripleChartKey } from "@/lib/posting-board-meta";
+
+const TREND_DAYS = 7;
+
+const CATEGORY_STACK_META: CategoryStackMetaItem[] = [
+  { dataKey: postingCategoryTripleChartKey("system"), label: "システム" },
+  { dataKey: postingCategoryTripleChartKey("web"), label: "Web" },
+];
+
+export type DashboardJobsPerDayRow = {
+  day: string;
+  count: number;
+  pl_lancers: number;
+  pl_crowdworks: number;
+  [dynamicKey: string]: string | number;
+};
+
+export type CategoryStackMetaItem = {
+  /** Recharts の dataKey（例: cn_システム） */
+  dataKey: string;
+  /** 凡例・Tooltip 表示名 */
+  label: string;
+};
 
 export async function getDashboardStatsBundle() {
   const startUtcDay = new Date();
@@ -53,22 +76,87 @@ export async function getDashboardStatsBundle() {
     .filter((n) => n > 0 && n < 600);
   const avgLatencySec = durSec.length ? durSec.reduce((a, b) => a + b, 0) / durSec.length : null;
 
-  const jobsPerDay: { day: string; count: number }[] = [];
+  type DayAgg = {
+    total: number;
+    lw: number;
+    cw: number;
+    cat: Map<string, number>;
+  };
 
-  for (let idx = 6; idx >= 0; idx--) {
+  function emptyDayAgg(): DayAgg {
+    return { total: 0, lw: 0, cw: 0, cat: new Map() };
+  }
+
+  const dayStarts: Date[] = [];
+  for (let idx = TREND_DAYS - 1; idx >= 0; idx--) {
     const start = new Date();
     start.setHours(0, 0, 0, 0);
     start.setDate(start.getDate() - idx);
-    const end = new Date(start);
-    end.setDate(end.getDate() + 1);
-    const count = await db.detectedJob.count({
-      where: { detectedAt: { gte: start, lt: end } },
-    });
-    jobsPerDay.push({
-      day: `${start.getMonth() + 1}/${start.getDate()}`,
-      count,
-    });
+    dayStarts.push(start);
   }
+
+  const rangeStart = dayStarts[0]!;
+  const rangeEnd = new Date(dayStarts[TREND_DAYS - 1]!);
+  rangeEnd.setDate(rangeEnd.getDate() + 1);
+
+  function dayLabel(d: Date): string {
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  }
+
+  const buckets = new Map<string, DayAgg>();
+  for (const ds of dayStarts) buckets.set(dayLabel(ds), emptyDayAgg());
+
+  const jobsInWindow = await db.detectedJob.findMany({
+    where: { detectedAt: { gte: rangeStart, lt: rangeEnd } },
+    select: {
+      detectedAt: true,
+      source: { select: { platform: true, url: true } },
+    },
+  });
+
+  for (const job of jobsInWindow) {
+    const ts = job.detectedAt.getTime();
+    let matchedStart: Date | null = null;
+    for (const s of dayStarts) {
+      const e = new Date(s);
+      e.setDate(e.getDate() + 1);
+      if (ts >= s.getTime() && ts < e.getTime()) {
+        matchedStart = s;
+        break;
+      }
+    }
+    if (!matchedStart) continue;
+    const dk = dayLabel(matchedStart);
+    const b = buckets.get(dk);
+    if (!b) continue;
+    b.total++;
+    const plat = bucketPlatformForStats(job.source.platform);
+    if (plat === "lancers") b.lw++;
+    else if (plat === "crowdworks") b.cw++;
+
+    const triple = jobBoardCategoryTriple(job.source.platform, job.source.url);
+    if (triple === "system" || triple === "web") {
+      const ck = postingCategoryTripleChartKey(triple);
+      b.cat.set(ck, (b.cat.get(ck) ?? 0) + 1);
+    }
+  }
+
+  const jobsPerDay: DashboardJobsPerDayRow[] = dayStarts.map((ds) => {
+    const dk = dayLabel(ds);
+    const b = buckets.get(dk)!;
+    const row: DashboardJobsPerDayRow = {
+      day: dk,
+      count: b.total,
+      pl_lancers: b.lw,
+      pl_crowdworks: b.cw,
+    };
+    for (const { dataKey } of CATEGORY_STACK_META) {
+      row[dataKey] = b.cat.get(dataKey) ?? 0;
+    }
+    return row;
+  });
+
+  const categoryStackLegend: CategoryStackMetaItem[] = CATEGORY_STACK_META;
 
   const sliceWeek = scrapeWeek.slice(-48);
   const scrapeSpark = sliceWeek.map((s, tick) => ({
@@ -96,6 +184,7 @@ export async function getDashboardStatsBundle() {
     backlogHint: Math.min(failedRecently, 50),
     recentActivity,
     jobsPerDay,
+    categoryStackLegend,
     scrapeSpark,
     generatedAt: new Date().toISOString(),
   };

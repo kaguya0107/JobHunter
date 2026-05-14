@@ -21,12 +21,15 @@ import {
   YAxis,
   BarChart,
   Bar,
+  Legend,
 } from "recharts";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
+
+type CategoryLegendItem = { dataKey: string; label: string };
 
 type Stats = {
   activeSources: number;
@@ -45,10 +48,20 @@ type Stats = {
     errorMessage: string | null;
     urlSlice: string;
   }>;
-  jobsPerDay: { day: string; count: number }[];
+  /** 検出求人（日別・プラットフォーム桶 + 一覧大分類桶）— Recharts が参照するフラットキー */
+  jobsPerDay: Record<string, string | number>[];
+  /** カテゴリ積み上げ用（システム / Web） */
+  categoryStackLegend: CategoryLegendItem[];
   scrapeSpark: { tick: number; success: number }[];
   generatedAt: string;
 };
+
+const PLATFORM_SERIES = [
+  { dataKey: "pl_lancers", label: "Lancers（LW）", fill: "#38bdf8" },
+  { dataKey: "pl_crowdworks", label: "CrowdWorks（CW）", fill: "#a78bfa" },
+] as const;
+
+const CATEGORY_STACK_COLORS = ["#fb7185", "#34d399"];
 
 export default function OverviewPage() {
   const { data, isLoading } = useQuery({
@@ -111,29 +124,84 @@ export default function OverviewPage() {
         <Card className="border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950 xl:col-span-4">
           <CardHeader className="pb-0">
             <CardTitle>Jobs discovered</CardTitle>
-            <CardDescription>Local-day buckets (browser TZ).</CardDescription>
+            <CardDescription>
+              積み上げはプラットフォーム別と、一覧URLから解釈した大分類（システム / Web）。
+            </CardDescription>
           </CardHeader>
-          <CardContent className="h-[300px] pt-6">
+          <CardContent className="space-y-8 pt-6">
             {isLoading ? (
-              <Skeleton className="size-full" />
+              <Skeleton className="h-[480px] w-full" />
             ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={data?.jobsPerDay}>
-                  <CartesianGrid strokeDasharray="4 12" opacity={0.2} vertical={false} />
-                  <XAxis dataKey="day" stroke="#71717a" />
-                  <YAxis stroke="#71717a" />
-                  <Tooltip
-                    cursor={{ fill: "#18181b10" }}
-                    contentStyle={{
-                      borderRadius: 10,
-                      border: "1px solid #27272a",
-                      background: "#09090bdc",
-                      color: "#fafafa",
-                    }}
-                  />
-                  <Bar radius={[8, 8, 0, 0]} dataKey="count" fill="#818cf8" />
-                </BarChart>
-              </ResponsiveContainer>
+              <>
+                <div className="space-y-2">
+                  <p className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                    Platform（投稿のプラットフォーム）
+                  </p>
+                  <div className="h-[212px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={data?.jobsPerDay}>
+                        <CartesianGrid strokeDasharray="4 12" opacity={0.2} vertical={false} />
+                        <XAxis dataKey="day" stroke="#71717a" />
+                        <YAxis stroke="#71717a" />
+                        <Tooltip
+                          cursor={{ fill: "#18181b10" }}
+                          contentStyle={{
+                            borderRadius: 10,
+                            border: "1px solid #27272a",
+                            background: "#09090bdc",
+                            color: "#fafafa",
+                          }}
+                        />
+                        <Legend wrapperStyle={{ fontSize: "11px" }} />
+                        {PLATFORM_SERIES.map((s) => (
+                          <Bar
+                            key={s.dataKey}
+                            stackId="plat"
+                            dataKey={s.dataKey}
+                            name={s.label}
+                            fill={s.fill}
+                            radius={[6, 6, 0, 0]}
+                          />
+                        ))}
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                    Listing category（大分類: システム / Web）
+                  </p>
+                  <div className="h-[212px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={data?.jobsPerDay}>
+                        <CartesianGrid strokeDasharray="4 12" opacity={0.2} vertical={false} />
+                        <XAxis dataKey="day" stroke="#71717a" />
+                        <YAxis stroke="#71717a" />
+                        <Tooltip
+                          cursor={{ fill: "#18181b10" }}
+                          contentStyle={{
+                            borderRadius: 10,
+                            border: "1px solid #27272a",
+                            background: "#09090bdc",
+                            color: "#fafafa",
+                          }}
+                        />
+                        <Legend wrapperStyle={{ fontSize: "11px" }} />
+                        {(data?.categoryStackLegend ?? []).map(({ dataKey, label }, idx) => (
+                          <Bar
+                            key={dataKey}
+                            stackId="cat"
+                            dataKey={dataKey}
+                            name={label}
+                            fill={CATEGORY_STACK_COLORS[idx % CATEGORY_STACK_COLORS.length]}
+                            radius={[6, 6, 0, 0]}
+                          />
+                        ))}
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              </>
             )}
           </CardContent>
         </Card>
@@ -141,28 +209,83 @@ export default function OverviewPage() {
         <Card className="border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950 xl:col-span-3">
           <CardHeader className="pb-0">
             <CardTitle>Trend</CardTitle>
-            <CardDescription>Same series, line smoothing.</CardDescription>
+            <CardDescription>左と同じ日次系列を折れ線（合計・PF別・大分類別）</CardDescription>
           </CardHeader>
-          <CardContent className="h-[300px] pt-6">
+          <CardContent className="space-y-8 pt-6">
             {isLoading ? (
-              <Skeleton className="size-full" />
+              <Skeleton className="h-[480px] w-full" />
             ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={data?.jobsPerDay}>
-                  <CartesianGrid strokeDasharray="4 12" opacity={0.15} vertical={false} />
-                  <XAxis dataKey="day" stroke="#71717a" />
-                  <YAxis stroke="#71717a" />
-                  <Tooltip
-                    contentStyle={{
-                      borderRadius: 10,
-                      border: "1px solid #27272a",
-                      background: "#09090bdc",
-                      color: "#fafafa",
-                    }}
-                  />
-                  <Line dot={false} type="monotone" dataKey="count" stroke="#34d399" strokeWidth={2} />
-                </LineChart>
-              </ResponsiveContainer>
+              <>
+                <div className="space-y-2">
+                  <p className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                    Detected · platform
+                  </p>
+                  <div className="h-[200px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={data?.jobsPerDay}>
+                        <CartesianGrid strokeDasharray="4 12" opacity={0.15} vertical={false} />
+                        <XAxis dataKey="day" stroke="#71717a" />
+                        <YAxis stroke="#71717a" />
+                        <Tooltip
+                          contentStyle={{
+                            borderRadius: 10,
+                            border: "1px solid #27272a",
+                            background: "#09090bdc",
+                            color: "#fafafa",
+                          }}
+                        />
+                        <Legend wrapperStyle={{ fontSize: "11px" }} />
+                        <Line dot={false} type="monotone" dataKey="count" name="合計検出" stroke="#e4e4e7" strokeWidth={2} />
+                        {PLATFORM_SERIES.map((s) => (
+                          <Line
+                            key={s.dataKey}
+                            dot={false}
+                            type="monotone"
+                            dataKey={s.dataKey}
+                            name={s.label}
+                            stroke={s.fill}
+                            strokeWidth={1.8}
+                          />
+                        ))}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                    Listing category（大分類）
+                  </p>
+                  <div className="h-[200px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={data?.jobsPerDay}>
+                        <CartesianGrid strokeDasharray="4 12" opacity={0.15} vertical={false} />
+                        <XAxis dataKey="day" stroke="#71717a" />
+                        <YAxis stroke="#71717a" />
+                        <Tooltip
+                          contentStyle={{
+                            borderRadius: 10,
+                            border: "1px solid #27272a",
+                            background: "#09090bdc",
+                            color: "#fafafa",
+                          }}
+                        />
+                        <Legend wrapperStyle={{ fontSize: "11px" }} />
+                        {(data?.categoryStackLegend ?? []).map(({ dataKey, label }, idx) => (
+                          <Line
+                            key={dataKey}
+                            dot={false}
+                            type="monotone"
+                            dataKey={dataKey}
+                            name={label}
+                            stroke={CATEGORY_STACK_COLORS[idx % CATEGORY_STACK_COLORS.length]}
+                            strokeWidth={1.8}
+                          />
+                        ))}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              </>
             )}
           </CardContent>
         </Card>
