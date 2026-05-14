@@ -1,12 +1,13 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { ExternalLinkIcon, StarIcon, UserIcon, UsersRoundIcon } from "lucide-react";
+import { ExternalLinkIcon, SearchIcon, StarIcon, UserIcon, UsersRoundIcon } from "lucide-react";
 import * as React from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -28,6 +29,33 @@ type Payload = {
   scan: { limit: number; orderedBy: "detectedAt_desc" };
 };
 
+/** 名前・プラットフォーム・補足・求人などをまとめた検索用文字列（小文字） */
+function clientSearchHaystack(row: ClientAnalysisRow): string {
+  const bits: string[] = [
+    row.displayName,
+    row.profilePath ?? "",
+    row.latestJobTitle,
+    row.extrasPreview ?? "",
+    row.extrasFull ?? "",
+    row.ordersDisplay ?? "",
+    ...row.platforms,
+    row.kind === "profile" ? "プロフィール" : "名前のみ",
+  ];
+  const platJoined = row.platforms.join(" ").toLowerCase();
+  if (platJoined.includes("lancer")) bits.push("lw", "lancers");
+  if (platJoined.includes("crowd")) bits.push("cw", "crowdworks");
+  bits.push(typeof row.ratingDisplay === "number" ? row.ratingDisplay.toFixed(1) : "0");
+  const last = new Date(row.lastDetectedAt).toLocaleString().toLowerCase();
+  bits.push(last, row.lastDetectedAt.slice(0, 10));
+  return bits.filter(Boolean).join(" ").toLowerCase();
+}
+
+function filterClients(clients: ClientAnalysisRow[], query: string): ClientAnalysisRow[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return clients;
+  return clients.filter((row) => clientSearchHaystack(row).includes(needle));
+}
+
 export default function ClientsAnalysisPage() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["client-analysis"],
@@ -40,6 +68,12 @@ export default function ClientsAnalysisPage() {
   });
 
   const [detailRow, setDetailRow] = React.useState<ClientAnalysisRow | null>(null);
+  const [clientSearchQuery, setClientSearchQuery] = React.useState("");
+
+  const filteredClients = React.useMemo(() => {
+    if (!data?.clients) return [];
+    return filterClients(data.clients, clientSearchQuery);
+  }, [data?.clients, clientSearchQuery]);
 
   return (
     <div className="space-y-8">
@@ -111,12 +145,37 @@ export default function ClientsAnalysisPage() {
           ) : null}
 
           <Card className="border-zinc-200 dark:border-zinc-800">
-            <CardHeader>
-              <CardTitle className="text-lg">クライアント一覧</CardTitle>
-              <CardDescription>
-                プロフィールURLがある場合はそれで同一視し、無い場合は「プラットフォーム × 表示名」でまとめています。アバターまたは表示名をクリックすると詳細を表示します。
-              </CardDescription>
+            <CardHeader className="gap-4 space-y-0 sm:flex-row sm:items-end sm:justify-between">
+              <div className="min-w-0 flex-1 space-y-1.5">
+                <CardTitle className="text-lg">クライアント一覧</CardTitle>
+                <CardDescription>
+                  プロフィールURLがある場合はそれで同一視し、無い場合は「プラットフォーム × 表示名」でまとめています。アバターまたは表示名をクリックすると詳細を表示します。
+                </CardDescription>
+              </div>
+              <div className="relative w-full shrink-0 sm:w-72">
+                <SearchIcon
+                  className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-zinc-400"
+                  aria-hidden
+                />
+                <Input
+                  value={clientSearchQuery}
+                  onChange={(e) => setClientSearchQuery(e.target.value)}
+                  placeholder="名前・PF・補足・求人タイトル…"
+                  className="bg-white pl-9 dark:bg-zinc-950"
+                  aria-label="クライアントを検索"
+                />
+              </div>
             </CardHeader>
+            {clientSearchQuery.trim() !== "" ? (
+              <p className="border-b border-zinc-100 px-6 pb-3 text-xs text-zinc-500 dark:border-zinc-800">
+                <span className="tabular-nums font-medium text-zinc-700 dark:text-zinc-300">
+                  {filteredClients.length}
+                </span>
+                <span className="mx-1">/</span>
+                <span className="tabular-nums">{data.clients.length}</span>
+                <span className="ml-1">件を表示</span>
+              </p>
+            ) : null}
             <CardContent className="overflow-x-auto p-0 sm:p-6">
               <Table>
                 <TableHeader>
@@ -137,8 +196,14 @@ export default function ClientsAnalysisPage() {
                         クライアント情報がまだありません。モニターから ingest された求人が溜まると表示されます。
                       </TableCell>
                     </TableRow>
+                  ) : filteredClients.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={7} className="text-center text-sm text-zinc-500">
+                        検索に一致するクライアントがありません。キーワードを変えるか削除してください。
+                      </TableCell>
+                    </TableRow>
                   ) : (
-                    data.clients.map((c) => (
+                    filteredClients.map((c) => (
                       <ClientTableRow key={c.key} row={c} onOpenDetail={() => setDetailRow(c)} />
                     ))
                   )}
