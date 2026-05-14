@@ -542,7 +542,8 @@ function DetectedJobsPaginationBar(props: {
 export default function JobsPage() {
   const qc = useQueryClient();
   const [q, setQ] = React.useState("");
-  const [platform, setPlatform] = React.useState<string>("");
+  const [boardPf, setBoardPf] = React.useState<"" | "lw" | "cw">("");
+  const [boardCat, setBoardCat] = React.useState<"" | "system" | "web">("");
   const [sort, setSort] = React.useState<"" | "score" | "posted">("");
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(20);
@@ -551,17 +552,18 @@ export default function JobsPage() {
 
   React.useEffect(() => {
     setPage(1);
-  }, [q, platform, sort]);
+  }, [q, boardPf, boardCat, sort]);
 
   const qs = React.useMemo(() => {
     const u = new URLSearchParams();
     if (q.trim()) u.set("q", q.trim());
-    if (platform) u.set("platform", platform);
+    if (boardPf) u.set("boardPf", boardPf);
+    if (boardCat) u.set("boardCat", boardCat);
     if (sort) u.set("sort", sort);
     u.set("page", String(page));
     u.set("limit", String(pageSize));
     return u.toString();
-  }, [q, platform, sort, page, pageSize]);
+  }, [q, boardPf, boardCat, sort, page, pageSize]);
 
   const { data, isLoading } = useQuery({
     queryKey: ["jobs", qs],
@@ -675,11 +677,36 @@ export default function JobsPage() {
             <CardTitle className="flex items-center gap-2 text-base">
               <FilterIcon className="size-4 text-zinc-500" /> Filters
             </CardTitle>
-            <CardDescription>Server-side fuzzy search on title, budget, client.</CardDescription>
+            <CardDescription>サーバー側でキーワード、プラットフォーム（LW／CW）、カテゴリ（システム／Web）、並び順を適用します。</CardDescription>
           </div>
           <div className="flex flex-1 flex-col gap-3 sm:flex-row sm:flex-wrap xl:justify-end">
-            <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Keyword…" className="sm:max-w-xs" />
-            <Input value={platform} onChange={(e) => setPlatform(e.target.value)} placeholder="Platform" className="sm:w-36" />
+            <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="キーワード…" className="sm:max-w-xs" />
+            <Select
+              value={boardPf === "" ? "__pf_all__" : boardPf}
+              onValueChange={(v) => setBoardPf(v === "__pf_all__" ? "" : (v as "lw" | "cw"))}
+            >
+              <SelectTrigger className="w-[182px]" aria-label="プラットフォームで絞り込み">
+                <SelectValue placeholder="プラットフォーム" />
+              </SelectTrigger>
+              <SelectContent position="popper" sideOffset={4}>
+                <SelectItem value="__pf_all__">プラットフォーム（すべて）</SelectItem>
+                <SelectItem value="lw">LW（ランサーズ）</SelectItem>
+                <SelectItem value="cw">CW（クラウドワークス）</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select
+              value={boardCat === "" ? "__cat_all__" : boardCat}
+              onValueChange={(v) => setBoardCat(v === "__cat_all__" ? "" : (v as "system" | "web"))}
+            >
+              <SelectTrigger className="w-[158px]" aria-label="求人カテゴリで絞り込み">
+                <SelectValue placeholder="カテゴリ" />
+              </SelectTrigger>
+              <SelectContent position="popper" sideOffset={4}>
+                <SelectItem value="__cat_all__">カテゴリ（すべて）</SelectItem>
+                <SelectItem value="system">システム</SelectItem>
+                <SelectItem value="web">Web</SelectItem>
+              </SelectContent>
+            </Select>
             <Select value={sort || "__default"} onValueChange={(v) => setSort(v === "__default" ? "" : (v as typeof sort))}>
               <SelectTrigger className="sm:w-[200px]">
                 <ArrowUpDownIcon className="mr-2 size-4 shrink-0" />
