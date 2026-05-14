@@ -17,6 +17,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import { PostingSourceBadges } from "@/components/posting-source-badges";
 
 const MODES: ScrapingType[] = ["HTML_PARSE", "API", "HYBRID"];
 const PAGE_SIZE = 8;
@@ -104,10 +105,14 @@ export default function SourcesPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Platform</TableHead>
+                    <TableHead className="min-w-[6.75rem]">
+                      <span className="block">Board</span>
+                      <span className="block text-[10px] font-normal normal-case text-zinc-400">
+                        LW/CW · category
+                      </span>
+                    </TableHead>
                     <TableHead>URL</TableHead>
                     <TableHead>Every</TableHead>
-                    <TableHead>Type</TableHead>
                     <TableHead>Parser</TableHead>
                     <TableHead>Last check</TableHead>
                     <TableHead>Status</TableHead>
@@ -221,12 +226,13 @@ function Row({ source, onRequestDelete }: { source: MonitoringSource; onRequestD
 
   return (
     <TableRow>
-      <TableCell className="font-medium">{source.platform}</TableCell>
+      <TableCell className="align-top">
+        <PostingSourceBadges dense platform={source.platform} listingUrl={source.url} />
+      </TableCell>
       <TableCell className="max-w-[220px] truncate font-mono text-xs text-zinc-500" title={source.url}>
         {source.url}
       </TableCell>
       <TableCell>{source.pollingInterval}s</TableCell>
-      <TableCell className="text-xs">{source.scrapingType}</TableCell>
       <TableCell className="font-mono text-xs">{source.parserVersion}</TableCell>
       <TableCell className="text-xs text-zinc-500">
         {source.lastCheckedAt ? new Date(source.lastCheckedAt).toLocaleString() : "—"}

@@ -54,6 +54,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { motion } from "framer-motion";
 
 import { cn } from "@/lib/utils";
+import { PostingSourceBadges } from "@/components/posting-source-badges";
 
 type ClientListingMeta = {
   ordersText: string | null;
@@ -722,7 +723,12 @@ export default function JobsPage() {
                       />
                     </TableHead>
                     <TableHead>Job</TableHead>
-                    <TableHead>Platform</TableHead>
+                    <TableHead className="min-w-[6rem]">
+                      <span className="block">Board</span>
+                      <span className="block text-[10px] font-normal normal-case text-zinc-500 dark:text-zinc-400">
+                        LW/CW · job category
+                      </span>
+                    </TableHead>
                     <TableHead className="min-w-[9rem]">Client</TableHead>
                     <TableHead>Budget</TableHead>
                     <TableHead className="hidden sm:table-cell">AI</TableHead>
@@ -781,7 +787,9 @@ export default function JobsPage() {
                             ))}
                           </div>
                         </TableCell>
-                        <TableCell className="whitespace-nowrap text-sm">{job.platform}</TableCell>
+                        <TableCell className="max-w-[7.25rem] align-top">
+                          <PostingSourceBadges dense platform={job.platform} listingUrl={job.sourceUrl} />
+                        </TableCell>
                         <ClientCell job={job} />
                         <TableCell className="max-w-[140px] truncate text-sm" title={job.budget}>
                           {job.budget || "—"}
@@ -885,12 +893,34 @@ export default function JobsPage() {
       <Dialog open={!!detail} onOpenChange={(open) => !open && setDetail(null)}>
         <DialogContent className="max-h-[90vh] max-w-xl overflow-hidden p-0 sm:rounded-2xl">
           <DialogHeader className="border-b border-zinc-200 px-6 py-5 dark:border-zinc-800">
-            <DialogTitle className="leading-tight">{detail?.title}</DialogTitle>
+            <DialogTitle className="pr-10 leading-tight">{detail?.title}</DialogTitle>
+            {detail ? (
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-400">LW/CW · board</span>
+                <PostingSourceBadges orientation="row" platform={detail.platform} listingUrl={detail.sourceUrl} />
+              </div>
+            ) : null}
           </DialogHeader>
           <ScrollArea className="max-h-[70vh] px-6 py-5">
             {detail ? (
               <div className="space-y-4 text-sm text-zinc-600 dark:text-zinc-400">
-                <DetailRow label="Platform" value={detail.platform} />
+                <DetailRow
+                  label="Listing feed"
+                  value={
+                    detail.sourceUrl ? (
+                      <a
+                        href={detail.sourceUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="break-all font-mono text-xs font-normal text-sky-700 underline decoration-sky-700/35 underline-offset-2 hover:text-sky-600 dark:text-sky-400"
+                      >
+                        {detail.sourceUrl}
+                      </a>
+                    ) : (
+                      "—"
+                    )
+                  }
+                />
                 <DetailRow label="Budget" value={detail.budget} />
                 <DetailRow label="Client" value={detail.clientName?.trim() || clientNameFromRaw(detail.rawData) || "—"} />
                 <DetailRow
@@ -941,11 +971,11 @@ export default function JobsPage() {
   );
 }
 
-function DetailRow(props: { label: string; value: string }) {
+function DetailRow(props: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex gap-6">
       <p className="w-36 shrink-0 text-xs uppercase tracking-wide text-zinc-400">{props.label}</p>
-      <p className="font-medium text-zinc-900 dark:text-zinc-100">{props.value}</p>
+      <div className="min-w-0 flex-1 text-sm font-medium text-zinc-900 dark:text-zinc-100">{props.value}</div>
     </div>
   );
 }
