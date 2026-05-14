@@ -62,6 +62,46 @@ type ClientListingMeta = {
   extrasLine: string | null;
 };
 
+type JobRow = {
+  id: string;
+  title: string;
+  description: string;
+  budget: string;
+  clientName: string;
+  clientProfileUrl?: string | null;
+  clientOrders?: string | null;
+  clientRating?: number | null;
+  clientExtrasSummary?: string | null;
+  clientAvatarUrl?: string | null;
+  projectUrl: string;
+  postedAt: string | null;
+  detectedAt: string;
+  aiScore: number | null;
+  tags: string[];
+  notificationSent: boolean;
+  platform: string;
+  sourceUrl: string;
+  aiScoreNormalized: number | null;
+  notificationStatus: string;
+  aiAnalysis: {
+    relevanceScore: number;
+    profitabilityScore: number;
+    spamScore: number;
+    urgencyScore: number;
+    analysisJson: Record<string, unknown>;
+  } | null;
+  rawData: unknown;
+};
+
+type JobsListPayload = {
+  jobs: JobRow[];
+  total: number;
+  page: number;
+  limit: number;
+  freshInWindow: number;
+  totalPages: number;
+};
+
 function getRawRecord(raw: unknown): Record<string, unknown> | null {
   if (!raw || typeof raw !== "object") return null;
   return raw as Record<string, unknown>;
@@ -114,12 +154,7 @@ function bridgedMonitorRaw(raw: unknown): Record<string, unknown> | null {
   };
 }
 
-/** Monitor ingest ``raw.detail_url`` is CrowdWorks when it points at crowdworks.jp. */
-function isCrowdWorksJobRaw(raw: unknown): boolean {
-  const r = bridgedMonitorRaw(raw);
-  const du = r?.detail_url;
-  return typeof du === "string" && du.toLowerCase().includes("crowdworks.jp");
-}
+
 
 /** Monitor `job_public_dict` uses snake_case (client_name, …). */
 function clientNameFromRaw(raw: unknown): string | null {
@@ -217,6 +252,46 @@ function parseClientListingMeta(raw: unknown): ClientListingMeta | null {
   return { ordersText, rating, extrasLine };
 }
 
+/** Prefer structured columns persisted from ingest; fall back to ``rawData`` parsing. */
+function parseClientListingMetaMerged(job: JobRow): ClientListingMeta | null {
+  const rawMeta = parseClientListingMeta(job.rawData);
+
+  let ordersText =
+    job.clientOrders != null && String(job.clientOrders).trim()
+      ? String(job.clientOrders).trim()
+      : null;
+  let rating =
+    typeof job.clientRating === "number" && Number.isFinite(job.clientRating)
+      ? job.clientRating
+      : null;
+
+  if (!ordersText && rawMeta?.ordersText) ordersText = rawMeta.ordersText;
+  if (rating == null && rawMeta?.rating != null) rating = rawMeta.rating;
+
+  const storedExtras =
+    typeof job.clientExtrasSummary === "string"
+      ? job.clientExtrasSummary.trim().replace(/\s+/g, " ")
+      : "";
+
+  let extrasLine: string | null = null;
+  if (storedExtras) {
+    if (!isRedundantLancersExtras(storedExtras, ordersText, rating)) {
+      extrasLine = extrasLineAfterChips(storedExtras, ordersText, rating);
+    }
+  }
+  if (!extrasLine && rawMeta?.extrasLine) extrasLine = rawMeta.extrasLine;
+
+  if (!ordersText && rating == null && !extrasLine) return null;
+  return { ordersText, rating, extrasLine };
+}
+
+function isCrowdWorksJob(job: Pick<JobRow, "platform" | "projectUrl" | "rawData">): boolean {
+  const p = job.platform?.toLowerCase() ?? "";
+  if (p.includes("crowd")) return true;
+  const du = bridgedMonitorRaw(job.rawData)?.detail_url ?? job.projectUrl;
+  return typeof du === "string" && du.toLowerCase().includes("crowdworks.jp");
+}
+
 /** Five stars on a 0–5 scale — supports fractional fill on the last active star. */
 function ClientRatingStars({ value }: { value: number }) {
   const clamped = Math.max(0, Math.min(5, value));
@@ -247,12 +322,12 @@ function ClientRatingStars({ value }: { value: number }) {
   );
 }
 
-function ClientMetaStrip({ raw }: { raw: unknown }) {
-  const meta = parseClientListingMeta(raw);
+function ClientMetaStrip({ job }: { job: JobRow }) {
+  const meta = parseClientListingMetaMerged(job);
   if (!meta) return null;
   const { ordersText, rating, extrasLine } = meta;
   if (!ordersText && rating == null && !extrasLine) return null;
-  const cw = isCrowdWorksJobRaw(raw);
+  const cw = isCrowdWorksJob(job);
   const ordersTitle = cw ? "契約数（クライアント）" : "発注数（クライアント）";
   const ratingTitle = cw ? "総合評価（星）" : "評価（一覧カード）";
 
@@ -288,6 +363,13 @@ function ClientMetaStrip({ raw }: { raw: unknown }) {
 }
 
 function resolveClientProfileUrl(job: JobRow): string | null {
+  const db = typeof job.clientProfileUrl === "string" ? job.clientProfileUrl.trim() : "";
+  if (db) {
+    const s = db;
+    if (s.startsWith("http://") || s.startsWith("https://")) return s;
+    const base = job.platform === "CrowdWorks" ? "https://crowdworks.jp" : "https://www.lancers.jp";
+    return `${base}${s.startsWith("/") ? "" : "/"}${s}`;
+  }
   const r = bridgedMonitorRaw(job.rawData);
   if (!r) return null;
   const u = r.client_profile_url;
@@ -301,15 +383,21 @@ function resolveClientProfileUrl(job: JobRow): string | null {
 function ClientCell({ job }: { job: JobRow }) {
   const displayName = (job.clientName?.trim() || clientNameFromRaw(job.rawData) || "").trim();
   const metaPlain = React.useMemo(() => {
-    const m = parseClientListingMeta(job.rawData);
+    const m = parseClientListingMetaMerged(job);
     if (!m) return null;
     const bits: string[] = [];
-    const cw = job.platform === "CrowdWorks" || isCrowdWorksJobRaw(job.rawData);
+    const cw = isCrowdWorksJob(job);
     if (m.ordersText) bits.push(`${cw ? "契約" : "発注"} ${m.ordersText}`);
     if (m.rating != null) bits.push(`${cw ? "総合評価" : "評価"} ${m.rating}`);
     if (m.extrasLine) bits.push(m.extrasLine);
     return bits.length ? bits.join(" · ") : null;
-  }, [job.rawData, job.platform]);
+  }, [
+    job.rawData,
+    job.platform,
+    job.clientOrders,
+    job.clientRating,
+    job.clientExtrasSummary,
+  ]);
   const profileUrl = resolveClientProfileUrl(job);
   const hasName = Boolean(displayName);
   const fullTitle = [displayName || null, metaPlain].filter(Boolean).join(" — ") || undefined;
@@ -317,7 +405,7 @@ function ClientCell({ job }: { job: JobRow }) {
   return (
     <TableCell className="max-w-[min(260px,32vw)] align-top">
       <div className="flex flex-col gap-1">
-        {profileUrl && hasName ? (
+        {profileUrl ? (
           <a
             href={profileUrl}
             target="_blank"
@@ -326,7 +414,7 @@ function ClientCell({ job }: { job: JobRow }) {
             title={fullTitle}
             onClick={(e) => e.stopPropagation()}
           >
-            {displayName}
+            {displayName || "クライアントプロフィール"}
           </a>
         ) : hasName ? (
           <span className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100" title={fullTitle}>
@@ -335,46 +423,11 @@ function ClientCell({ job }: { job: JobRow }) {
         ) : (
           <span className="text-sm text-zinc-400">—</span>
         )}
-        <ClientMetaStrip raw={job.rawData} />
+        <ClientMetaStrip job={job} />
       </div>
     </TableCell>
   );
 }
-
-type JobRow = {
-  id: string;
-  title: string;
-  description: string;
-  budget: string;
-  clientName: string;
-  projectUrl: string;
-  postedAt: string | null;
-  detectedAt: string;
-  aiScore: number | null;
-  tags: string[];
-  notificationSent: boolean;
-  platform: string;
-  sourceUrl: string;
-  aiScoreNormalized: number | null;
-  notificationStatus: string;
-  aiAnalysis: {
-    relevanceScore: number;
-    profitabilityScore: number;
-    spamScore: number;
-    urgencyScore: number;
-    analysisJson: Record<string, unknown>;
-  } | null;
-  rawData: unknown;
-};
-
-type JobsListPayload = {
-  jobs: JobRow[];
-  total: number;
-  page: number;
-  limit: number;
-  freshInWindow: number;
-  totalPages: number;
-};
 
 const NEW_MS = 2 * 3600 * 1000;
 
@@ -1005,6 +1058,45 @@ export default function JobsPage() {
                 />
                 <DetailRow label="Budget" value={detail.budget} />
                 <DetailRow label="Client" value={detail.clientName?.trim() || clientNameFromRaw(detail.rawData) || "—"} />
+                <DetailRow
+                  label="Client profile"
+                  value={
+                    detail && resolveClientProfileUrl(detail) ? (
+                      <a
+                        href={resolveClientProfileUrl(detail)!}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="break-all font-normal text-sky-700 underline decoration-sky-700/35 underline-offset-2 hover:text-sky-600 dark:text-sky-400"
+                      >
+                        {resolveClientProfileUrl(detail)}
+                      </a>
+                    ) : (
+                      "—"
+                    )
+                  }
+                />
+                <DetailRow
+                  label={isCrowdWorksJob(detail) ? "Contracts (client)" : "Orders (client)"}
+                  value={detail.clientOrders?.trim() || "—"}
+                />
+                <DetailRow
+                  label={isCrowdWorksJob(detail) ? "Rating (overall)" : "Rating (listing)"}
+                  value={
+                    typeof detail.clientRating === "number" && Number.isFinite(detail.clientRating)
+                      ? `${detail.clientRating.toFixed(1)} / 5`
+                      : "—"
+                  }
+                />
+                <DetailRow
+                  label="Client details"
+                  value={
+                    detail.clientExtrasSummary?.trim() ? (
+                      <span className="block whitespace-pre-wrap font-normal">{detail.clientExtrasSummary}</span>
+                    ) : (
+                      "—"
+                    )
+                  }
+                />
                 <DetailRow
                   label="Posted"
                   value={detail.postedAt ? new Date(detail.postedAt).toLocaleString() : "—"}

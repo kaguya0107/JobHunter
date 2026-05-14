@@ -96,6 +96,8 @@ export async function GET(req: Request) {
         { title: { contains: q, mode: "insensitive" } },
         { clientName: { contains: q, mode: "insensitive" } },
         { budget: { contains: q, mode: "insensitive" } },
+        { clientExtrasSummary: { contains: q, mode: "insensitive" } },
+        { clientOrders: { contains: q, mode: "insensitive" } },
       ],
     });
   }
