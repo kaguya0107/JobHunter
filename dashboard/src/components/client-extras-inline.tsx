@@ -7,9 +7,9 @@ import { sanitizeClientExtrasText } from "@/lib/client-extras-text";
 import { cn } from "@/lib/utils";
 
 /** フィードバック 良n・悪m */
-const FEEDBACK_PAIR = /フィードバック\s*良(\d+)\s*[・·]\s*悪(\d+)/u;
+export const FEEDBACK_PAIR = /フィードバック\s*良(\d+)\s*[・·]\s*悪(\d+)/u;
 /** フィードバック（良）n件 */
-const FEEDBACK_GOOD_ONLY = /フィードバック\s*（良）(\d+)\s*件/u;
+export const FEEDBACK_GOOD_ONLY = /フィードバック\s*（良）(\d+)\s*件/u;
 
 function MidDot({ className }: { className?: string }) {
   return (
@@ -63,6 +63,57 @@ function FeedbackBadge({
       ) : null}
     </span>
   );
+}
+
+export function parseLancersFeedbackCounts(haystack: string): { good: number; bad: number } | null {
+  const norm = haystack.replace(/\s+/g, " ").trim();
+  if (!norm) return null;
+  const pair = FEEDBACK_PAIR.exec(norm);
+  if (pair) return { good: parseInt(pair[1]!, 10), bad: parseInt(pair[2]!, 10) };
+  const go = FEEDBACK_GOOD_ONLY.exec(norm);
+  if (go) return { good: parseInt(go[1]!, 10), bad: 0 };
+  return null;
+}
+
+/** 補足プレビューからフィードバック文言を除く（専用チップと重複しないように）。 */
+export function stripLancersFeedbackPhrases(extrasPreview: string): string {
+  let t = extrasPreview.replace(/\s+/g, " ");
+  t = t.replace(FEEDBACK_PAIR, " ").replace(FEEDBACK_GOOD_ONLY, " ");
+  t = t.replace(/\s*·\s*/g, " · ").replace(/\s+/g, " ").trim();
+  return t
+    .replace(/^\s*·\s*|\s*·\s*$/g, "")
+    .trim();
+}
+
+/**
+ * ランサーズ: フィードバック良・悪をサムズアイコン付きで表示。
+ * 補足に無い場合はダッシュで揃える。
+ */
+export function LancersClientFeedbackStrip({ haystack, compact = true }: { haystack: string; compact?: boolean }) {
+  const parsed = parseLancersFeedbackCounts(haystack);
+  if (!parsed) {
+    return (
+      <span
+        className={cn(
+          "inline-flex shrink-0 items-center gap-1.5 rounded-md border border-dashed border-zinc-300/90 bg-zinc-50/90 px-1.5 py-0.5 dark:border-zinc-600 dark:bg-zinc-900/70",
+          compact ? "text-[10px]" : "text-[11px]",
+        )}
+        role="group"
+        aria-label="フィードバック件数は取得できていません"
+      >
+        <span className="inline-flex items-center gap-0.5 font-medium tabular-nums text-zinc-500 dark:text-zinc-400">
+          <ThumbsUp className={cn("shrink-0 opacity-75", compact ? "size-2.5" : "size-3")} aria-hidden />
+          良 —
+        </span>
+        <MidDot />
+        <span className="inline-flex items-center gap-0.5 font-medium tabular-nums text-zinc-500 dark:text-zinc-400">
+          <ThumbsDown className={cn("shrink-0 opacity-75", compact ? "size-2.5" : "size-3")} aria-hidden />
+          悪 —
+        </span>
+      </span>
+    );
+  }
+  return <FeedbackBadge good={String(parsed.good)} bad={String(parsed.bad)} compact={compact} />;
 }
 
 function buildFeedbackLayout(text: string, compact: boolean): React.ReactNode {

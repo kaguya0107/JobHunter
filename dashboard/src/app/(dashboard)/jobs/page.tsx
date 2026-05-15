@@ -16,6 +16,7 @@ import {
   InfoIcon,
   MoreHorizontalIcon,
   PackageIcon,
+  PercentIcon,
   SparklesIcon,
   StarIcon,
   XCircleIcon,
@@ -45,7 +46,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -53,7 +53,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { motion } from "framer-motion";
 
-import { ClientExtrasInline } from "@/components/client-extras-inline";
+import { ClientExtrasInline, LancersClientFeedbackStrip, parseLancersFeedbackCounts, stripLancersFeedbackPhrases } from "@/components/client-extras-inline";
 import { sanitizeClientExtrasText } from "@/lib/client-extras-text";
 import { cn } from "@/lib/utils";
 import { PostingSourceBadges } from "@/components/posting-source-badges";
@@ -290,6 +290,16 @@ function parseClientListingMetaMerged(job: JobRow): ClientListingMeta | null {
   return { ordersText, rating, extrasLine };
 }
 
+/** プラットフォーム別にチップを常時出すため、メタが空でも LW/CW 行では空メタを返す。 */
+function clientStripMeta(job: JobRow): ClientListingMeta | null {
+  const m = parseClientListingMetaMerged(job);
+  if (m) return m;
+  if (isLancersPlatformJob(job) || isCrowdWorksJob(job)) {
+    return { ordersText: null, rating: null, extrasLine: null };
+  }
+  return null;
+}
+
 function hasJobClientSignals(job: JobRow): boolean {
   if (job.clientName?.trim()) return true;
   if (typeof job.clientProfileUrl === "string" && job.clientProfileUrl.trim()) return true;
@@ -311,6 +321,75 @@ function isCrowdWorksJob(job: Pick<JobRow, "platform" | "projectUrl" | "rawData"
   if (p.includes("crowd")) return true;
   const du = bridgedMonitorRaw(job.rawData)?.detail_url ?? job.projectUrl;
   return typeof du === "string" && du.toLowerCase().includes("crowdworks.jp");
+}
+
+function isLancersPlatformJob(job: Pick<JobRow, "platform" | "projectUrl" | "rawData">): boolean {
+  if (isCrowdWorksJob(job)) return false;
+  const p = job.platform?.toLowerCase() ?? "";
+  if (p.includes("lancer")) return true;
+  const u = ((bridgedMonitorRaw(job.rawData)?.detail_url as string | undefined) ?? job.projectUrl ?? "").toLowerCase();
+  return u.includes("lancers.jp");
+}
+
+/** DB の補足 + raw の client_extras を結合（発注率・完了率などの抽出用）。 */
+function clientExtrasHaystack(job: JobRow): string {
+  const parts: string[] = [];
+  if (typeof job.clientExtrasSummary === "string" && job.clientExtrasSummary.trim()) {
+    parts.push(job.clientExtrasSummary.trim().replace(/\s+/g, " "));
+  }
+  const r = bridgedMonitorRaw(job.rawData);
+  if (typeof r?.client_extras === "string" && r.client_extras.trim()) {
+    parts.push(r.client_extras.trim().replace(/\s+/g, " "));
+  }
+  return parts.join(" · ").replace(/\s+/g, " ").trim();
+}
+
+/** ランサーズ補足の「発注率 …」断片。無い・未計算は "—"。 */
+function lancersOrderRateChipFromHaystack(haystack: string): string {
+  const norm = haystack.replace(/\s+/g, " ");
+  const key = "発注率";
+  const i = norm.indexOf(key);
+  if (i === -1) return "—";
+  const rest = norm.slice(i + key.length).trim();
+  const seg = rest.split("·")[0]?.trim() ?? "";
+  if (!seg) return "—";
+  if (/^([-—.—]+|%)$/.test(seg) || /^[-—.—]+%$/u.test(seg) || seg.startsWith("---")) return "—";
+  return seg;
+}
+
+/** 補足プレビューから発注率行を除き、チップと重複させない。 */
+function stripLancersOrderRateSegment(extrasPreview: string): string {
+  const norm = extrasPreview.replace(/\s+/g, " ").trim();
+  const key = "発注率";
+  const i = norm.indexOf(key);
+  if (i === -1) return norm;
+  const before = norm.slice(0, i).trim();
+  const rest = norm.slice(i + key.length).trim();
+  let after = "";
+  if (rest.includes("·")) {
+    after = rest
+      .split("·")
+      .slice(1)
+      .join("·")
+      .trim();
+  }
+  const merged = [before, after].filter(Boolean).join(" · ").replace(/\s+/g, " ").trim();
+  return merged.length ? merged : "";
+}
+
+/** CrowdWorks 補足の完了率「N%」。 */
+function crowdworksCompletionRateChipFromHaystack(haystack: string): string {
+  const norm = haystack.replace(/\s+/g, " ");
+  const m = norm.match(/完了率\s*(\d{1,3}%)/u);
+  if (m?.[1]) return m[1];
+  return "—";
+}
+
+/** 補足プレビューから「完了率 N%」を除く。 */
+function stripCrowdworksCompletionSegment(extrasPreview: string): string {
+  const norm = extrasPreview.replace(/\s+/g, " ").trim();
+  const replaced = norm.replace(/\s*完了率\s*\d{1,3}%\s*/u, " ").replace(/\s+/g, " ").trim();
+  return replaced.length ? replaced : "";
 }
 
 /** Five stars on a 0–5 scale — supports fractional fill on the last active star. */
@@ -344,34 +423,71 @@ function ClientRatingStars({ value }: { value: number }) {
 }
 
 function ClientMetaStrip({ job }: { job: JobRow }) {
-  const meta = parseClientListingMetaMerged(job);
+  const meta = clientStripMeta(job);
   if (!meta) return null;
-  const { ordersText, rating, extrasLine } = meta;
+
   const cw = isCrowdWorksJob(job);
+  const lan = isLancersPlatformJob(job);
+  const hay = clientExtrasHaystack(job);
+
+  let extrasLine = meta.extrasLine;
+  if (lan && extrasLine) {
+    extrasLine = stripLancersOrderRateSegment(extrasLine);
+    extrasLine = stripLancersFeedbackPhrases(extrasLine);
+  } else if (cw && extrasLine) {
+    extrasLine = stripCrowdworksCompletionSegment(extrasLine);
+  }
+  if (!extrasLine?.trim()) extrasLine = null;
+
   const ordersTitle = cw ? "契約数（クライアント）" : "発注数（クライアント）";
   const ratingTitle = cw ? "総合評価（星）" : "評価（一覧カード）";
-  const ratingDisplay = rating ?? 0;
+  const ratingDisplay = meta.rating ?? 0;
+  const ordersChip = meta.ordersText?.trim() || "—";
+  const lancersRate = lan ? lancersOrderRateChipFromHaystack(hay) : null;
+  const cwCompletion = cw ? crowdworksCompletionRateChipFromHaystack(hay) : null;
 
   return (
     <div className="flex flex-col gap-1">
       <div className="flex flex-wrap items-center gap-1.5">
-        {ordersText ? (
+        <span
+          className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[11px] text-zinc-800 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+          title={ordersTitle}
+        >
+          <PackageIcon className="size-3 shrink-0 text-zinc-500 dark:text-zinc-400" aria-hidden />
+          <span className="font-medium tabular-nums">{ordersChip}</span>
+        </span>
+        {lan ? (
           <span
-            className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[11px] text-zinc-800 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
-            title={ordersTitle}
+            className="inline-flex items-center gap-1 rounded-md border border-violet-500/35 bg-violet-500/10 px-1.5 py-0.5 text-[11px] text-violet-950 dark:border-violet-500/35 dark:bg-violet-500/15 dark:text-violet-100"
+            title="発注率（クライアント補足・プロフィール由来）"
           >
-            <PackageIcon className="size-3 shrink-0 text-zinc-500 dark:text-zinc-400" aria-hidden />
-            <span className="font-medium tabular-nums">{ordersText}</span>
+            <PercentIcon className="size-3 shrink-0 text-violet-600 opacity-90 dark:text-violet-300" aria-hidden />
+            <span className="max-w-[6rem] truncate font-medium tabular-nums">{lancersRate}</span>
+          </span>
+        ) : null}
+        {cw ? (
+          <span
+            className="inline-flex items-center gap-1 rounded-md border border-emerald-500/35 bg-emerald-500/10 px-1.5 py-0.5 text-[11px] text-emerald-950 dark:border-emerald-500/35 dark:bg-emerald-500/15 dark:text-emerald-50"
+            title="完了率（クライアント補足・プロフィール由来）"
+          >
+            <PercentIcon className="size-3 shrink-0 text-emerald-700 opacity-90 dark:text-emerald-300" aria-hidden />
+            <span className="font-medium tabular-nums">{cwCompletion}</span>
           </span>
         ) : null}
         <span
           className="inline-flex items-center gap-1 rounded-md border border-amber-500/35 bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-50"
-          title={rating == null ? `${ratingTitle}（データなし · 0.0 として表示）` : ratingTitle}
+          title={meta.rating == null ? `${ratingTitle}（データなし · 0.0 として表示）` : ratingTitle}
         >
           <ClientRatingStars value={ratingDisplay} />
           <span className="font-semibold tabular-nums">{ratingDisplay.toFixed(1)}</span>
         </span>
       </div>
+      {lan ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="sr-only">フィードバック</span>
+          <LancersClientFeedbackStrip haystack={hay} compact />
+        </div>
+      ) : null}
       {extrasLine ? (
         <div
           className="line-clamp-2 text-[10px] leading-snug text-zinc-500 dark:text-zinc-400"
@@ -405,13 +521,32 @@ function resolveClientProfileUrl(job: JobRow): string | null {
 function ClientCell({ job }: { job: JobRow }) {
   const displayName = (job.clientName?.trim() || clientNameFromRaw(job.rawData) || "").trim();
   const metaPlain = React.useMemo(() => {
-    const m = parseClientListingMetaMerged(job);
+    const m = clientStripMeta(job);
     if (!m) return null;
     const bits: string[] = [];
     const cw = isCrowdWorksJob(job);
-    if (m.ordersText) bits.push(`${cw ? "契約" : "発注"} ${m.ordersText}`);
+    const lan = isLancersPlatformJob(job);
+    const hay = clientExtrasHaystack(job);
+
+    bits.push(`${cw ? "契約" : "発注"} ${m.ordersText?.trim() || "—"}`);
+    if (lan) bits.push(`発注率 ${lancersOrderRateChipFromHaystack(hay)}`);
+    if (cw) bits.push(`完了率 ${crowdworksCompletionRateChipFromHaystack(hay)}`);
     bits.push(`${cw ? "総合評価" : "評価"} ${m.rating ?? 0}`);
-    if (m.extrasLine) bits.push(m.extrasLine);
+    if (lan) {
+      const fb = parseLancersFeedbackCounts(hay);
+      bits.push(
+        fb ? `フィードバック 良${fb.good}・悪${fb.bad}` : "フィードバック 未取得",
+      );
+    }
+
+    let ex = m.extrasLine;
+    if (ex) {
+      if (lan) {
+        ex = stripLancersOrderRateSegment(ex);
+        ex = stripLancersFeedbackPhrases(ex);
+      } else if (cw) ex = stripCrowdworksCompletionSegment(ex);
+      if (ex.trim()) bits.push(ex);
+    }
     return bits.length ? bits.join(" · ") : null;
   }, [job]);
   const profileUrl = resolveClientProfileUrl(job);
@@ -1042,8 +1177,8 @@ export default function JobsPage() {
       </Card>
 
       <Dialog open={!!detail} onOpenChange={(open) => !open && setDetail(null)}>
-        <DialogContent className="max-h-[90vh] max-w-xl overflow-hidden p-0 sm:rounded-2xl">
-          <DialogHeader className="border-b border-zinc-200 px-6 py-5 dark:border-zinc-800">
+        <DialogContent className="flex max-h-[90vh] w-[calc(100%-2rem)] max-w-xl flex-col gap-0 overflow-hidden p-0 sm:rounded-2xl">
+          <DialogHeader className="shrink-0 border-b border-zinc-200 px-6 py-5 dark:border-zinc-800">
             <DialogTitle className="pr-10 leading-tight">{detail?.title}</DialogTitle>
             {detail ? (
               <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -1052,9 +1187,26 @@ export default function JobsPage() {
               </div>
             ) : null}
           </DialogHeader>
-          <ScrollArea className="max-h-[70vh] px-6 py-5">
+          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-6 py-5 [scrollbar-gutter:stable]">
             {detail ? (
-              <div className="space-y-4 text-sm text-zinc-600 dark:text-zinc-400">
+              <div className="space-y-4 pb-2 text-sm text-zinc-600 dark:text-zinc-400">
+                <DetailRow
+                  label="投稿のリンク"
+                  value={
+                    detail.projectUrl ? (
+                      <a
+                        href={detail.projectUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="break-all font-mono text-xs font-normal text-sky-700 underline decoration-sky-700/35 underline-offset-2 hover:text-sky-600 dark:text-sky-400"
+                      >
+                        {detail.projectUrl}
+                      </a>
+                    ) : (
+                      "—"
+                    )
+                  }
+                />
                 <DetailRow
                   label="Listing feed"
                   value={
@@ -1095,6 +1247,20 @@ export default function JobsPage() {
                   label={isCrowdWorksJob(detail) ? "Contracts (client)" : "Orders (client)"}
                   value={detail.clientOrders?.trim() || "—"}
                 />
+                {isCrowdWorksJob(detail) ? (
+                  <DetailRow
+                    label="完了率（補足）"
+                    value={crowdworksCompletionRateChipFromHaystack(clientExtrasHaystack(detail))}
+                  />
+                ) : (
+                  <DetailRow label="発注率（補足）" value={lancersOrderRateChipFromHaystack(clientExtrasHaystack(detail))} />
+                )}
+                {isLancersPlatformJob(detail) ? (
+                  <DetailRow
+                    label="フィードバック"
+                    value={<LancersClientFeedbackStrip haystack={clientExtrasHaystack(detail)} compact={false} />}
+                  />
+                ) : null}
                 <DetailRow
                   label={isCrowdWorksJob(detail) ? "Rating (overall)" : "Rating (listing)"}
                   value={
@@ -1105,18 +1271,20 @@ export default function JobsPage() {
                 />
                 <DetailRow
                   label="Client details"
-                  value={
-                    detail.clientExtrasSummary?.trim() ? (
+                  value={(() => {
+                    const raw = detail.clientExtrasSummary?.trim();
+                    if (!raw) return "—";
+                    const forInline = isLancersPlatformJob(detail) ? stripLancersFeedbackPhrases(raw) : raw;
+                    if (!forInline.trim()) return "—";
+                    return (
                       <span className="block whitespace-pre-wrap font-normal">
                         <ClientExtrasInline
-                          text={detail.clientExtrasSummary}
+                          text={forInline}
                           className="text-sm text-zinc-800 dark:text-zinc-100"
                         />
                       </span>
-                    ) : (
-                      "—"
-                    )
-                  }
+                    );
+                  })()}
                 />
                 <DetailRow
                   label="Posted"
@@ -1141,14 +1309,14 @@ export default function JobsPage() {
                 </div>
                 <div>
                   <Label className="text-xs uppercase text-zinc-500">AI JSON</Label>
-                  <pre className="mt-2 max-h-[200px] overflow-auto rounded-xl bg-zinc-950 p-3 text-[11px] text-zinc-100">
+                  <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-xl bg-zinc-950 p-3 text-[11px] leading-relaxed text-zinc-100">
                     {JSON.stringify(detail.aiAnalysis?.analysisJson ?? {}, null, 2)}
                   </pre>
                 </div>
               </div>
             ) : null}
-          </ScrollArea>
-          <DialogFooter className="gap-3 border-t border-zinc-200 px-6 py-4 dark:border-zinc-800 sm:justify-between">
+          </div>
+          <DialogFooter className="shrink-0 gap-3 border-t border-zinc-200 px-6 py-4 dark:border-zinc-800 sm:justify-between">
             <Button variant="outline" asChild>
               <a href={detail?.projectUrl ?? "#"} target="_blank" rel="noopener noreferrer">
                 Open posting
