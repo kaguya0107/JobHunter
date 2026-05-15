@@ -113,7 +113,7 @@ export default function ClientsAnalysisPage() {
 
   const [detailRow, setDetailRow] = React.useState<ClientAnalysisRow | null>(null);
   const [clientSearchQuery, setClientSearchQuery] = React.useState("");
-  const [sortKey, setSortKey] = React.useState<ClientSortKey>("recruitmentAchievement");
+  const [sortKey, setSortKey] = React.useState<ClientSortKey>("lastDetected");
   const [sortDir, setSortDir] = React.useState<ClientSortDir>("desc");
 
   const filteredClients = React.useMemo(() => {
